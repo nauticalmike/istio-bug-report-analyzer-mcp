@@ -15,10 +15,20 @@
     "test:watch": "vitest",
     "test:samples": "node dist/test-samples.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nauticalmike/istio-bug-report-analyzer-mcp.git"
+  },
+  "author": "Michael Acostamadiedo",
+  "files": [
+    "dist/",
+    "templates/"
+  ],
   "keywords": [
-    "mcp",
     "istio",
+    "mcp",
     "bug-report",
+    "diagnostic",
     "service-mesh"
   ],
   "license": "Apache-2.0",
