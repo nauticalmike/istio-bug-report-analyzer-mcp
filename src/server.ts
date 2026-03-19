@@ -5,6 +5,8 @@ import type { ServerConfig } from "./types.js";
 import { loadBugReport } from "./tools/load.js";
 import { getOverview } from "./tools/overview.js";
 import { getVersions } from "./tools/versions.js";
+import { getAnalyzeResults } from "./tools/analyze-results.js";
+import { getClusterResources } from "./tools/cluster-resources.js";
 import type { BugReportStore } from "./archive/store.js";
 
 export function createServer(config: ServerConfig) {
@@ -28,6 +30,37 @@ export function createServer(config: ServerConfig) {
     "Load an existing istioctl bug-report archive (.tar.gz) or pre-extracted directory for analysis",
     { path: z.string().describe("Path to .tar.gz archive or pre-extracted directory") },
     async ({ path }) => loadBugReport({ path }, getStore, setStore, setSession),
+  );
+
+  server.tool(
+    "get_analyze_results",
+    "Get istioctl analyze results (IST codes). Filter by severity or code.",
+    {
+      severity: z.enum(["Error", "Warning", "Info"]).optional().describe("Filter by severity"),
+      code: z.string().optional().describe("Filter by IST code (e.g. IST0101)"),
+    },
+    async ({ severity, code }) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return getAnalyzeResults(store, { severity, code });
+    },
+  );
+
+  server.tool(
+    "get_cluster_resources",
+    "Query Kubernetes resources from the bug report. Filter by kind, namespace, name.",
+    {
+      kind: z.string().optional().describe("Resource kind (e.g. VirtualService, Gateway, Pod)"),
+      namespace: z.string().optional().describe("Namespace filter"),
+      name: z.string().optional().describe("Resource name filter"),
+      full: z.boolean().optional().describe("Return full YAML instead of summary table"),
+      limit: z.number().optional().describe("Max resources to return (default 50)"),
+    },
+    async (params) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return getClusterResources(store, params);
+    },
   );
 
   server.tool(
