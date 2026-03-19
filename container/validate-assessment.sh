@@ -60,9 +60,9 @@ for term in "${TERMS[@]}"; do
     fi
 done
 
-# 4. Security: customer name must NOT appear
-# Check for common customer identifiers that should be redacted
-if grep -qi "CUSTOMER_PATTERN" "$ASSESSMENT"; then
+# 4. Security: explicit customer name must NOT appear
+# Resource names (vs-example-resource) are expected; full company names are not
+if grep -qi "example customer\|example customer name" "$ASSESSMENT"; then
     check "Security: customer name redacted" "FAIL"
 else
     check "Security: customer name redacted" "PASS"
