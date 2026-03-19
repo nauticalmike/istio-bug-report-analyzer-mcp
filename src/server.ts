@@ -11,6 +11,7 @@ import { getProxyConfig } from "./tools/proxy-config.js";
 import { getLogs } from "./tools/logs.js";
 import { getIstiodDebug } from "./tools/istiod-debug.js";
 import type { BugReportStore } from "./archive/store.js";
+import { listFiles, getRawFile } from "./resources/archive-resource.js";
 
 export function createServer(config: ServerConfig) {
   let currentSession: Session | null = null;
@@ -134,6 +135,28 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
       return getVersions(store);
+    },
+  );
+
+  server.tool(
+    "list_files",
+    "List all files in the loaded bug report archive",
+    {},
+    async () => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return listFiles(store);
+    },
+  );
+
+  server.tool(
+    "get_raw_file",
+    "Read a raw file from the bug report archive by its relative path",
+    { path: z.string().describe("Relative path within the archive (e.g. 'proxies/default/pod-name/istio-proxy.log')") },
+    async ({ path }) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return getRawFile(store, path);
     },
   );
 
