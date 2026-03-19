@@ -7,6 +7,8 @@ import { getOverview } from "./tools/overview.js";
 import { getVersions } from "./tools/versions.js";
 import { getAnalyzeResults } from "./tools/analyze-results.js";
 import { getClusterResources } from "./tools/cluster-resources.js";
+import { getProxyConfig } from "./tools/proxy-config.js";
+import { getLogs } from "./tools/logs.js";
 import type { BugReportStore } from "./archive/store.js";
 
 export function createServer(config: ServerConfig) {
@@ -60,6 +62,40 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
       return getClusterResources(store, params);
+    },
+  );
+
+  server.tool(
+    "get_proxy_config",
+    "Get Envoy proxy configuration for a specific pod. Sections: config_dump, listeners, clusters, certs, memory, server_info, stats.",
+    {
+      namespace: z.string().describe("Pod namespace"),
+      pod: z.string().describe("Pod name"),
+      section: z.string().optional().describe("Config section (default: config_dump)"),
+    },
+    async (params) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return getProxyConfig(store, params);
+    },
+  );
+
+  server.tool(
+    "get_logs",
+    "Get logs from proxy, istiod, operator, or cni components. Supports severity/keyword filtering and tail.",
+    {
+      component: z.enum(["proxy", "istiod", "operator", "cni", "all"]).describe("Which component's logs to fetch"),
+      namespace: z.string().optional().describe("Filter to namespace"),
+      pod: z.string().optional().describe("Filter to specific pod"),
+      severity: z.string().optional().describe("Filter lines containing this severity (error, warn, info)"),
+      keyword: z.string().optional().describe("Filter lines containing this keyword"),
+      limit: z.number().optional().describe("Max output lines (default 500)"),
+      tail: z.number().optional().describe("Return only the last N lines"),
+    },
+    async (params) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
+      return getLogs(store, params);
     },
   );
 
