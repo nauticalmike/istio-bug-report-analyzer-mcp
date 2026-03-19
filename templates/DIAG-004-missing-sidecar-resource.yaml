@@ -1,0 +1,41 @@
+id: DIAG-004
+name: No Sidecar Resources Defined
+category: config
+severity: warning
+description: >
+  No Sidecar resources were found in the mesh. Without Sidecar resources,
+  every proxy receives configuration for every service in the mesh.
+rootCause: >
+  Sidecar resources have not been created to scope proxy configurations.
+  This is common in initial deployments but problematic at scale.
+impact: >
+  Proxies consume more memory and CPU. Config push times increase linearly
+  with the number of services. In large meshes this causes OOM kills and
+  slow convergence.
+signals:
+  - source:
+      type: resource
+      kind: Sidecar
+      field: "kind"
+    check:
+      op: not_exists
+remediation:
+  - order: 1
+    description: "Create a default Sidecar resource in istio-system to limit egress scope"
+    yaml: |
+      apiVersion: networking.istio.io/v1
+      kind: Sidecar
+      metadata:
+        name: default
+        namespace: istio-system
+      spec:
+        egress:
+          - hosts:
+              - "./*"
+              - "istio-system/*"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/reference/config/networking/sidecar/"
+enrichmentHints:
+  docsQuery: "Sidecar resource scoping best practices"

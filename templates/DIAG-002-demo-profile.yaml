@@ -1,0 +1,28 @@
+id: DIAG-002
+name: Demo Profile Detected
+category: config
+severity: critical
+description: >
+  The Istio installation appears to use the demo profile, which is intended
+  for learning and evaluation only.
+rootCause: >
+  Istio was installed with --set profile=demo or equivalent settings.
+  Demo profile enables all features with minimal resources.
+impact: >
+  Minimal resource allocations, 100% trace sampling, debug-level access
+  logging, no HPA/PDB, relaxed security defaults.
+signals:
+  - source:
+      type: istiod
+      endpoint: mesh
+      path: "accessLogFile"
+    check:
+      op: equals
+      value: "/dev/stdout"
+remediation:
+  - order: 1
+    description: "Migrate to Helm-based installation with production values"
+    effort: high
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/setup/additional-setup/config-profiles/"

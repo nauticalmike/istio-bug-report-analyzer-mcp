@@ -1,0 +1,34 @@
+id: DIAG-005
+name: EnvoyFilter Resources Detected
+category: envoyfilter
+severity: warning
+description: >
+  One or more EnvoyFilter resources are present. EnvoyFilters are fragile —
+  they patch Envoy config at a specific structure that changes across versions.
+rootCause: >
+  EnvoyFilters were created to customize proxy behavior beyond what Istio APIs support.
+  They are version-specific and may silently break after Istio upgrades.
+impact: >
+  Stale or misconfigured EnvoyFilters can cause traffic routing failures,
+  proxy crashes, or silent config rejection. They are the #1 cause of
+  post-upgrade breakage.
+signals:
+  - source:
+      type: resource
+      kind: EnvoyFilter
+      field: "kind"
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Audit each EnvoyFilter for version compatibility with the current Istio version"
+    effort: medium
+    risk: low
+  - order: 2
+    description: "Replace EnvoyFilters with native Istio APIs where possible (e.g. Telemetry, WasmPlugin)"
+    effort: high
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/reference/config/networking/envoy-filter/"
+enrichmentHints:
+  docsQuery: "EnvoyFilter migration alternatives Istio"

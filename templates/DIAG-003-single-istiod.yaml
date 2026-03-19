@@ -1,0 +1,45 @@
+id: DIAG-003
+name: Single Istiod Replica (No HA)
+category: config
+severity: warning
+description: >
+  Only one istiod replica is running. This is a single point of failure
+  for the entire mesh control plane.
+rootCause: >
+  Istiod was deployed with replicas=1 (the default). Production deployments
+  should run at least 2 replicas for high availability.
+impact: >
+  If the single istiod pod is evicted, restarted, or experiences a failure,
+  all proxy configuration updates stop. New pods cannot get sidecar injection.
+signals:
+  - source:
+      type: istiod
+      endpoint: syncz
+      path: ""
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Scale istiod to at least 2 replicas"
+    command: "kubectl scale deployment istiod -n istio-system --replicas=2"
+    effort: trivial
+    risk: none
+  - order: 2
+    description: "Add a PodDisruptionBudget for istiod"
+    yaml: |
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: istiod
+        namespace: istio-system
+      spec:
+        minAvailable: 1
+        selector:
+          matchLabels:
+            app: istiod
+    effort: low
+    risk: none
+references:
+  - "https://istio.io/latest/docs/setup/additional-setup/customize-installation/"
+enrichmentHints:
+  docsQuery: "istiod high availability production deployment"

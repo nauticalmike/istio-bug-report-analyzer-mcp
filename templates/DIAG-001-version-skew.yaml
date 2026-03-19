@@ -1,0 +1,34 @@
+id: DIAG-001
+name: Proxy-Control Plane Version Skew
+category: version
+severity: warning
+description: >
+  One or more proxy versions do not match the control plane version.
+  Istio supports proxies within one minor version of the control plane.
+rootCause: >
+  Proxies were not restarted after a control plane upgrade, or different
+  namespaces are injecting different proxy versions.
+impact: >
+  Version-mismatched proxies may not receive new features, could have
+  incompatible xDS behavior, and are harder to debug.
+signals:
+  - source:
+      type: version
+    check:
+      op: exists
+  - source:
+      type: istiod
+      endpoint: syncz
+      path: ""
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Restart all pods to pick up the new proxy version"
+    command: "kubectl rollout restart deployment -n <namespace>"
+    effort: medium
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/releases/supported-releases/"
+enrichmentHints:
+  docsQuery: "Istio proxy version skew support policy"
