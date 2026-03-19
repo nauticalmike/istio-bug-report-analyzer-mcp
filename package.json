@@ -1,0 +1,41 @@
+{
+  "name": "istio-bug-report-analyzer-mcp",
+  "version": "0.1.0",
+  "description": "MCP server to analyze istioctl bug-report archives",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "istio-bug-report-analyzer-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:samples": "node dist/test-samples.js"
+  },
+  "keywords": [
+    "mcp",
+    "istio",
+    "bug-report",
+    "service-mesh"
+  ],
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "js-yaml": "^4.1.1",
+    "tar": "^7.5.11",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.5.0",
+    "@types/tar": "^7.0.87",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  }
+}

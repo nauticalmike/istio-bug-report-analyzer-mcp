@@ -1,3 +1,8 @@
+# Node.js
+node_modules/
+dist/
+*.tgz
+
 # Bug report samples — contain customer data, NEVER commit
 samples/
 
