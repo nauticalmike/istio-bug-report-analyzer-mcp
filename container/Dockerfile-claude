@@ -1,0 +1,36 @@
+FROM node:20-alpine
+
+# Install system packages
+RUN apk update && apk add --no-cache \
+    bash \
+    curl \
+    git \
+    vim \
+    openssh-client \
+    jq \
+    yq \
+    sudo
+
+# Install kubectl
+RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
+    chmod +x kubectl && \
+    mv kubectl /usr/local/bin/
+
+# Install Claude Code CLI
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create non-root user
+RUN adduser -D -s /bin/bash claude && \
+    echo "claude ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+# Switch to claude user
+USER claude
+
+# Set up directories
+RUN mkdir -p /home/claude/.kube /home/claude/.claude
+
+# Set up working directory
+WORKDIR /workspace
+
+# Default command - keep container running
+CMD ["bash"]
