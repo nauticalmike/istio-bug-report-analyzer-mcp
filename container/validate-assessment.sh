@@ -5,6 +5,10 @@ ASSESSMENT="container/e2e-output/assessment.md"
 REFERENCE="samples/assessments"
 RESULTS="container/e2e-output/validation-results.txt"
 
+# Set REDACT_PATTERN to a grep -i regex matching customer names that must not appear
+# Example: REDACT_PATTERN="acme corp\|acme inc" validate-assessment.sh
+REDACT_PATTERN="${REDACT_PATTERN:-}"
+
 mkdir -p container/e2e-output
 
 echo "=== E2E Assessment Validation ===" | tee "$RESULTS"
@@ -61,11 +65,15 @@ for term in "${TERMS[@]}"; do
 done
 
 # 4. Security: explicit customer name must NOT appear
-# Resource names (vs-example-resource) are expected; full company names are not
-if grep -qi "example customer\|example customer name" "$ASSESSMENT"; then
-    check "Security: customer name redacted" "FAIL"
+# Explicit customer/company names must not appear in the assessment
+if [ -n "$REDACT_PATTERN" ]; then
+    if grep -qi "$REDACT_PATTERN" "$ASSESSMENT"; then
+        check "Security: customer name redacted" "FAIL"
+    else
+        check "Security: customer name redacted" "PASS"
+    fi
 else
-    check "Security: customer name redacted" "PASS"
+    check "Security: customer name redacted (no REDACT_PATTERN set, skipped)" "WARN"
 fi
 
 # 5. Compare with reference (if available)
