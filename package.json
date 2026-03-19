@@ -22,7 +22,8 @@
   "author": "Michael Acostamadiedo",
   "files": [
     "dist/",
-    "templates/"
+    "templates/",
+    "skills/"
   ],
   "keywords": [
     "istio",
