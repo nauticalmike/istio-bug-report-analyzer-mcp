@@ -140,6 +140,13 @@ Mode-aware strategic recommendations:
 - **Ambient mode**: waypoint deployment strategy for L7 needs, AuthorizationPolicy migration from Istio API to Gateway API
 - **Interop mode**: phased migration plan from sidecar to ambient per namespace, consolidation timeline
 
+**Post-Generation Anonymization:**
+Resource names from the bug report (VirtualServices, DestinationRules, EnvoyFilters, namespaces) often contain customer domains, partner names, or internal project names. After generating the assessment:
+- Scan the document for customer-identifying strings (company names, domains, partner references)
+- Replace with generic equivalents (e.g., `vs-partner-sftp` instead of `vs-bob-na4-livevox-com`, `acme-source-chain` instead of `customer-source-chain`)
+- Preserve the technical meaning — the anonymized name should still convey the resource's purpose
+- Ask the user to review for any remaining identifying information before sharing externally
+
 Write the document to the specified file path. Present a brief summary to the user:
 
 ```
