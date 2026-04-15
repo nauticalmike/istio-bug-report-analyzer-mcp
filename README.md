@@ -8,6 +8,7 @@ An MCP (Model Context Protocol) server that analyzes `istioctl bug-report` archi
 - **Load** existing `.tar.gz` archives or pre-extracted directories
 - **Analyze** using built-in diagnostic templates for known issues
 - **Query** specific sections of the archive (proxy configs, logs, istiod debug endpoints)
+- **Estimate resource savings** from sidecar-to-ambient migration with per-namespace breakdowns
 - **Generate** structured assessment documents with findings and remediation steps
 
 ## Installation
@@ -47,6 +48,7 @@ Then restart Claude Code to pick up the new skill.
 | `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.) |
 | `run_diagnostics` | Run diagnostic templates against the archive |
 | `find_errors` | Scan logs for errors, deduplicate by pattern |
+| `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
 | `list_files` | List all files in the archive |
 | `get_raw_file` | Read any file from the archive |
 
@@ -63,6 +65,16 @@ Or use individual tools directly:
 ```
 Load the bug report at /path/to/bug-report.tar.gz and analyze it
 ```
+
+## Resource Impact Analysis
+
+The `estimate_resource_savings` tool analyzes the mesh's infrastructure footprint and estimates savings from migrating to ambient mesh:
+
+- **Sidecar mode**: Calculates current sidecar CPU/memory usage and projects ambient costs (ztunnel + waypoint proxies), showing net savings and node equivalence
+- **Ambient mode**: Reports current ztunnel and waypoint resource usage relative to cluster capacity
+- **Interop mode**: Per-namespace breakdown showing which sidecar namespaces would benefit most from completing the migration
+
+The tool extracts actual resource requests from Pod specs when available, falling back to Istio defaults. It also flags optimization opportunities like over-provisioned sidecars and high-density namespaces.
 
 ## Solo.io Integration
 
