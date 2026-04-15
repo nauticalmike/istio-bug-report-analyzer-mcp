@@ -86,6 +86,20 @@ If mode is **interop**:
 If mode is **sidecar**:
 - Standard analysis applies. Sidecar CRDs, EnvoyFilters, injection labels are all relevant.
 
+## Phase 3.5: Resource Impact Analysis
+
+Run `estimate_resource_savings` to quantify the mesh's infrastructure footprint.
+
+Interpret the results based on the detected data plane mode:
+
+- **Sidecar mode**: Frame as a migration opportunity — "migrating to ambient would free X cores and Y Gi of memory, equivalent to ~N nodes." Highlight namespaces with the most sidecars as prime migration candidates.
+- **Ambient mode**: Review current ztunnel and waypoint resource usage. Flag over-provisioned waypoints or unusually high ztunnel memory. Suggest right-sizing if actual usage is well below requests.
+- **Interop mode**: Identify which sidecar namespaces would benefit most from completing the migration to ambient. Show the per-namespace savings potential.
+
+Cross-reference with diagnostic findings:
+- If DIAG-004 (missing sidecar resources) fired, the resource analysis quantifies the un-bounded resource consumption
+- If high proxy memory/CPU optimization opportunities appear, include them in the remediation roadmap
+
 If Solo.io tools are available (soloio-docs-mcp, Support-Agent-Tools, SoloKnowledgeBaseMCP):
 - Use the enrichment hints from diagnostic findings to search for relevant documentation
 - Check the knowledge base for known solutions
@@ -131,14 +145,22 @@ Mode-specific best practices:
 - **Ambient mode**: waypoint proxy sizing and HA, L4 AuthorizationPolicy placement, Gateway API resource best practices, HBONE connectivity
 - **Interop mode**: namespace labeling consistency, cross-mode traffic patterns, migration path guidance
 
-### 7. Remediation Roadmap
-Phased: Immediate → Cleanup → Overhaul → Maturity. Each step: action, effort, risk.
+### 7. Resource Impact Analysis
+- Current mesh resource footprint (CPU cores, memory) with source (actual vs default estimates)
+- Per-namespace breakdown table (sorted by resource consumption)
+- For sidecar/interop mode: projected ambient resource usage and net savings
+- For ambient mode: current ztunnel + waypoint usage relative to cluster capacity
+- Optimization opportunities (over-provisioned proxies, right-sizing candidates)
+- Node equivalence estimate (how many nodes could be reclaimed)
 
-### 8. Looking Ahead
+### 8. Remediation Roadmap
+Phased: Immediate → Cleanup → Overhaul → Maturity. Each step: action, effort, risk. Reference resource savings estimates from Section 7 to prioritize high-impact items.
+
+### 9. Looking Ahead
 Mode-aware strategic recommendations:
-- **Sidecar mode**: evaluate ambient mesh migration for L4-only workloads, Gateway API migration path
+- **Sidecar mode**: evaluate ambient mesh migration for L4-only workloads (reference resource savings from Section 7), Gateway API migration path
 - **Ambient mode**: waypoint deployment strategy for L7 needs, AuthorizationPolicy migration from Istio API to Gateway API
-- **Interop mode**: phased migration plan from sidecar to ambient per namespace, consolidation timeline
+- **Interop mode**: phased migration plan from sidecar to ambient per namespace (prioritize by resource savings from Section 7), consolidation timeline
 
 **Post-Generation Anonymization:**
 Resource names from the bug report (VirtualServices, DestinationRules, EnvoyFilters, namespaces) often contain customer domains, partner names, or internal project names. After generating the assessment:
