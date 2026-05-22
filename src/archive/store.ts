@@ -64,11 +64,21 @@ export class BugReportStore {
       }
     }
 
-    // Cluster resources
+    // Cluster resources. `cluster/k8s-resources` is a full dump; `cluster/nodes`
+    // and `cluster/pods` are dedicated subsets of the same objects, so the same
+    // resource can appear in more than one file. Deduplicate by identity to
+    // prevent inflated counts and double-summed resource aggregates.
+    const seenResources = new Set<string>();
+    const resourceKey = (r: ParsedResource): string =>
+      `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
     for (const file of ["cluster/k8s-resources", "cluster/crs", "cluster/nodes", "cluster/pods"]) {
       const content = await this.readFileContent(file);
-      if (content) {
-        this.clusterResources.push(...parseYamlMultiDoc(content));
+      if (!content) continue;
+      for (const resource of parseYamlMultiDoc(content)) {
+        const key = resourceKey(resource);
+        if (seenResources.has(key)) continue;
+        seenResources.add(key);
+        this.clusterResources.push(resource);
       }
     }
 
