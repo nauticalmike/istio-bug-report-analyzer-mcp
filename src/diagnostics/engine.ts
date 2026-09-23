@@ -104,12 +104,14 @@ export class DiagnosticEngine {
         const re = new RegExp(source.pattern);
         if (source.component === "proxy" || source.component === "all") {
           for (const pod of store.getProxyPods()) {
-            if (pod.logs && re.test(pod.logs)) return pod.logs;
+            const logs = pod.logs;
+            if (logs && re.test(logs)) return logs;
           }
         }
         if (source.component === "istiod" || source.component === "all") {
           for (const pod of store.getIstiodPods()) {
-            if (pod.discoveryLog && re.test(pod.discoveryLog)) return pod.discoveryLog;
+            const discoveryLog = pod.discoveryLog;
+            if (discoveryLog && re.test(discoveryLog)) return discoveryLog;
           }
         }
         if (source.component === "operator" || source.component === "all") {
@@ -132,8 +134,9 @@ export class DiagnosticEngine {
         const pods = store.getProxyPods();
         if (pods.length === 0) return null;
         const pod = pods[0];
-        if (source.section === "config_dump" && pod.configDump) {
-          return source.path ? getNestedValue(pod.configDump, source.path) : pod.configDump;
+        if (source.section === "config_dump") {
+          const configDump = pod.configDump;
+          if (configDump) return source.path ? getNestedValue(configDump, source.path) : configDump;
         }
         return store.getProxyConfig(pod.namespace, pod.podName, source.section);
       }

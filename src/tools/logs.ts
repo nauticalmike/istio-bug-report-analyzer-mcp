@@ -20,8 +20,9 @@ export function getLogs(
       : store.getProxyPods();
     for (const p of pods) {
       if (params.pod && p.podName !== params.pod) continue;
-      if (p.logs) {
-        for (const line of p.logs.split("\n")) {
+      const logs = p.logs;
+      if (logs) {
+        for (const line of logs.split("\n")) {
           if (line.trim()) allLines.push({ source: `proxy/${p.namespace}/${p.podName}`, line });
         }
       }
@@ -34,8 +35,9 @@ export function getLogs(
       : store.getIstiodPods();
     for (const p of pods) {
       if (params.pod && p.podName !== params.pod) continue;
-      if (p.discoveryLog) {
-        for (const line of p.discoveryLog.split("\n")) {
+      const discoveryLog = p.discoveryLog;
+      if (discoveryLog) {
+        for (const line of discoveryLog.split("\n")) {
           if (line.trim()) allLines.push({ source: `istiod/${p.namespace}/${p.podName}`, line });
         }
       }

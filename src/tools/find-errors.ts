@@ -16,8 +16,9 @@ export function findErrors(
 
   if (!params.component || params.component === "proxy" || params.component === "all") {
     for (const pod of store.getProxyPods()) {
-      if (!pod.logs) continue;
-      for (const line of pod.logs.split("\n")) {
+      const logs = pod.logs;
+      if (!logs) continue;
+      for (const line of logs.split("\n")) {
         if (line.trim() && severityRe.test(line)) {
           errorLines.push({ component: `proxy/${pod.namespace}/${pod.podName}`, line: line.trim() });
         }
@@ -27,8 +28,9 @@ export function findErrors(
 
   if (!params.component || params.component === "istiod" || params.component === "all") {
     for (const pod of store.getIstiodPods()) {
-      if (!pod.discoveryLog) continue;
-      for (const line of pod.discoveryLog.split("\n")) {
+      const discoveryLog = pod.discoveryLog;
+      if (!discoveryLog) continue;
+      for (const line of discoveryLog.split("\n")) {
         if (line.trim() && severityRe.test(line)) {
           errorLines.push({ component: `istiod/${pod.namespace}/${pod.podName}`, line: line.trim() });
         }
