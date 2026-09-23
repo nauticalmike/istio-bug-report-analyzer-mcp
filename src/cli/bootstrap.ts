@@ -62,7 +62,9 @@ export async function runBugReport(
   const outputDir = options.outputDir ?? join(tmpdir(), `bug-report-${Date.now()}`);
   await mkdir(outputDir, { recursive: true });
 
-  const args = ["bug-report", "--full-secrets", `--dir=${outputDir}`];
+  // istioctl treats --dir as *temporary* artifact storage and removes it when
+  // done; the archive itself is written to --output-dir (default: cwd).
+  const args = ["bug-report", "--full-secrets", `--output-dir=${outputDir}`];
   if (options.context) args.push("--context", options.context);
   if (options.namespaces?.length) {
     args.push("--include", options.namespaces.join(","));
