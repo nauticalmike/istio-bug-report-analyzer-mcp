@@ -71,7 +71,11 @@ export async function extractArchive(archivePath: string, outputDir: string): Pr
     cwd: outputDir,
   });
 
-  const entries = await readdir(outputDir);
-  const bugReportDir = entries.find((e) => e === "bug-report" || e.startsWith("bug-report"));
-  return bugReportDir ? join(outputDir, bugReportDir) : outputDir;
+  // Older istioctl wraps everything in a `bug-report/` directory; newer
+  // releases (1.30+) place the sections at the tar root next to a *file*
+  // named `bug-report.log`, so only directory entries may be treated as
+  // the archive root.
+  const entries = await readdir(outputDir, { withFileTypes: true });
+  const bugReportDir = entries.find((e) => e.isDirectory() && e.name.startsWith("bug-report"));
+  return bugReportDir ? join(outputDir, bugReportDir.name) : outputDir;
 }
