@@ -8,6 +8,8 @@ import type {
   ProxyInfo,
   IstiodInfo,
   ParsedResource,
+  ProxyType,
+  DataPlaneModeInfo,
 } from "../types.js";
 
 /**
@@ -62,6 +64,7 @@ export class BugReportStore {
   private proxies = new Map<string, ProxyInfo[]>();
   private istiodPods = new Map<string, IstiodInfo[]>();
   private clusterResources: ParsedResource[] = [];
+  private cachedModeInfo: DataPlaneModeInfo | null = null;
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
@@ -105,10 +108,21 @@ export class BugReportStore {
 
     // Cluster dumps are parsed one file at a time; each raw string goes out
     // of scope immediately so only the parsed objects are retained.
+    // `cluster/k8s-resources` is a full dump; `cluster/nodes` and
+    // `cluster/pods` are dedicated subsets of the same objects, so the same
+    // resource can appear in more than one file. Deduplicate by identity to
+    // prevent inflated counts and double-summed resource aggregates.
+    const seenResources = new Set<string>();
+    const resourceKey = (r: ParsedResource): string =>
+      `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
     for (const file of ["cluster/k8s-resources", "cluster/crs", "cluster/nodes", "cluster/pods"]) {
       const content = await this.readFileContent(file);
-      if (content) {
-        this.clusterResources.push(...parseYamlMultiDoc(content));
+      if (!content) continue;
+      for (const resource of parseYamlMultiDoc(content)) {
+        const key = resourceKey(resource);
+        if (seenResources.has(key)) continue;
+        seenResources.add(key);
+        this.clusterResources.push(resource);
       }
     }
 
@@ -225,12 +239,69 @@ export class BugReportStore {
   getAllFiles(): string[] {
     return this.index.files.map((f) => f.relativePath);
   }
+
+  detectDataPlaneMode(): DataPlaneModeInfo {
+    if (this.cachedModeInfo) return this.cachedModeInfo;
+
+    const allProxies = this.getProxyPods();
+    const hasZtunnel = allProxies.some((p) => p.proxyType === "ztunnel");
+    const hasWaypoints = allProxies.some((p) => p.proxyType === "waypoint");
+    const hasSidecars = allProxies.some((p) => p.proxyType === "sidecar");
+
+    // Check namespace labels for ambient mode
+    const namespaces = this.clusterResources.filter((r) => r.kind === "Namespace");
+    const ambientNamespaces = namespaces
+      .filter((ns) => ns.metadata?.labels?.["istio.io/dataplane-mode"] === "ambient")
+      .map((ns) => ns.metadata.name);
+
+    // Check for sidecar-injected namespaces (injection label or pods with sidecar status)
+    const sidecarNamespaces = new Set<string>();
+    for (const ns of namespaces) {
+      if (ns.metadata?.labels?.["istio-injection"] === "enabled") {
+        sidecarNamespaces.add(ns.metadata.name);
+      }
+    }
+    for (const proxy of allProxies) {
+      if (proxy.proxyType === "sidecar") {
+        sidecarNamespaces.add(proxy.namespace);
+      }
+    }
+
+    const hasAmbientSignals = hasZtunnel || hasWaypoints || ambientNamespaces.length > 0;
+
+    let mode: DataPlaneModeInfo["mode"];
+    if (hasAmbientSignals && hasSidecars) {
+      mode = "interop";
+    } else if (hasAmbientSignals) {
+      mode = "ambient";
+    } else {
+      mode = "sidecar";
+    }
+
+    this.cachedModeInfo = {
+      mode,
+      hasZtunnel,
+      hasWaypoints,
+      hasSidecars,
+      ambientNamespaces,
+      sidecarNamespaces: Array.from(sidecarNamespaces),
+    };
+
+    return this.cachedModeInfo;
+  }
+}
+
+function classifyProxyType(podName: string): ProxyType {
+  if (podName.startsWith("ztunnel-")) return "ztunnel";
+  if (podName.includes("waypoint")) return "waypoint";
+  return "sidecar";
 }
 
 function makeLazyProxyInfo(namespace: string, podName: string, files: Map<string, string>): ProxyInfo {
   return {
     namespace,
     podName,
+    proxyType: classifyProxyType(podName),
     get logs() {
       return readNow(files.get("istio-proxy.log"));
     },

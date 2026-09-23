@@ -1,7 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import yaml from "js-yaml";
-import type { DiagnosticTemplate, DiagnosticFinding, Signal } from "../types.js";
+import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } from "../types.js";
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 
@@ -29,11 +29,12 @@ export class DiagnosticEngine {
     this.templates.push(template);
   }
 
-  async run(store: BugReportStore, categories?: string[]): Promise<DiagnosticFinding[]> {
+  async run(store: BugReportStore, categories?: string[], mode?: DataPlaneMode): Promise<DiagnosticFinding[]> {
     const findings: DiagnosticFinding[] = [];
 
     for (const template of this.templates) {
       if (categories && !categories.includes(template.category)) continue;
+      if (template.appliesTo && mode && !template.appliesTo.includes(mode)) continue;
 
       let allMatch = true;
       for (const signal of template.signals) {

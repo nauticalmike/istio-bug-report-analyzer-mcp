@@ -10,7 +10,17 @@ export function parseYamlMultiDoc(content: string): ParsedResource[] {
     try {
       const parsed = yaml.load(trimmed);
       if (parsed && typeof parsed === "object") {
-        docs.push(parsed as ParsedResource);
+        const obj = parsed as Record<string, unknown>;
+        // Unwrap Kubernetes List objects (apiVersion: v1, kind: *List, items: [...])
+        if (Array.isArray(obj.items) && typeof obj.kind === "string" && obj.kind.endsWith("List")) {
+          for (const item of obj.items) {
+            if (item && typeof item === "object") {
+              docs.push(item as ParsedResource);
+            }
+          }
+        } else {
+          docs.push(parsed as ParsedResource);
+        }
       }
     } catch {
       // Skip unparseable documents

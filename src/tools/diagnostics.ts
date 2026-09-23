@@ -14,7 +14,8 @@ export async function runDiagnostics(
   await engine.loadTemplates(TEMPLATES_DIR);
 
   const categories = params.categories?.split(",").map((c) => c.trim());
-  const findings = await engine.run(store, categories);
+  const modeInfo = store.detectDataPlaneMode();
+  const findings = await engine.run(store, categories, modeInfo.mode);
 
   if (findings.length === 0) {
     return {
@@ -26,7 +27,7 @@ export async function runDiagnostics(
   }
 
   const lines = [
-    `=== Diagnostic Results: ${findings.length} findings ===`,
+    `=== Diagnostic Results: ${findings.length} findings (mode: ${modeInfo.mode}) ===`,
     "",
   ];
 

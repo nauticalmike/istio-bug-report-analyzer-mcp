@@ -1,6 +1,6 @@
 {
   "name": "istio-bug-report-analyzer-mcp",
-  "version": "0.1.0",
+  "version": "0.3.1",
   "description": "MCP server to analyze istioctl bug-report archives",
   "type": "module",
   "main": "dist/index.js",
@@ -17,12 +17,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/nauticalmike/istio-bug-report-analyzer-mcp.git"
+    "url": "git+https://github.com/nauticalmike/istio-bug-report-analyzer-mcp.git"
   },
   "author": "Michael Acostamadiedo",
   "files": [
     "dist/",
-    "templates/"
+    "templates/",
+    "skills/"
   ],
   "keywords": [
     "istio",

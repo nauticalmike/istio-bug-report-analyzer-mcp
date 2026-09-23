@@ -15,6 +15,7 @@ import type { BugReportStore } from "./archive/store.js";
 import { listFiles, getRawFile } from "./resources/archive-resource.js";
 import { runDiagnostics } from "./tools/diagnostics.js";
 import { findErrors } from "./tools/find-errors.js";
+import { estimateResourceSavings } from "./tools/resource-savings.js";
 
 export function createServer(config: ServerConfig) {
   let currentSession: Session | null = null;
@@ -180,6 +181,17 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
       return findErrors(store, params);
+    },
+  );
+
+  server.tool(
+    "estimate_resource_savings",
+    "Estimate CPU/memory savings from sidecar-to-ambient migration, or analyze current mesh resource footprint. Reports per-namespace breakdown and optimization opportunities.",
+    {},
+    async () => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
+      return estimateResourceSavings(store);
     },
   );
 

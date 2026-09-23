@@ -47,6 +47,7 @@ export interface ParsedResource {
 export interface ProxyInfo {
   namespace: string;
   podName: string;
+  proxyType: ProxyType;
   logs: string | null;
   certs: string | null;
   clusters: string | null;
@@ -85,6 +86,21 @@ export interface AnalyzeResult {
   resource: string;    // e.g. "Namespace/VirtualService/default/my-vs"
 }
 
+// === Data Plane Mode Types ===
+
+export type DataPlaneMode = "sidecar" | "ambient" | "interop";
+
+export type ProxyType = "sidecar" | "ztunnel" | "waypoint" | "unknown";
+
+export interface DataPlaneModeInfo {
+  mode: DataPlaneMode;
+  hasZtunnel: boolean;
+  hasWaypoints: boolean;
+  hasSidecars: boolean;
+  ambientNamespaces: string[];
+  sidecarNamespaces: string[];
+}
+
 // === Diagnostic Types ===
 
 export interface DiagnosticTemplate {
@@ -93,6 +109,7 @@ export interface DiagnosticTemplate {
   category: DiagnosticCategory;
   severity: "critical" | "warning" | "info";
   appliesToVersions?: string;
+  appliesTo?: DataPlaneMode[];
   signals: Signal[];
   description: string;
   rootCause: string;

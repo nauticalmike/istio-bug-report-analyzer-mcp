@@ -2,6 +2,9 @@ id: DIAG-005
 name: EnvoyFilter Resources Detected
 category: envoyfilter
 severity: warning
+appliesTo:
+  - sidecar
+  - interop
 description: >
   One or more EnvoyFilter resources are present. EnvoyFilters are fragile —
   they patch Envoy config at a specific structure that changes across versions.

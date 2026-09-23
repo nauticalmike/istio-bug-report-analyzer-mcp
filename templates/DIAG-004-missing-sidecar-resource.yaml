@@ -2,6 +2,9 @@ id: DIAG-004
 name: No Sidecar Resources Defined
 category: config
 severity: warning
+appliesTo:
+  - sidecar
+  - interop
 description: >
   No Sidecar resources were found in the mesh. Without Sidecar resources,
   every proxy receives configuration for every service in the mesh.
