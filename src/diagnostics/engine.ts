@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import yaml from "js-yaml";
+import { load } from "js-yaml";
 import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } from "../types.js";
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
@@ -14,7 +14,7 @@ export class DiagnosticEngine {
       for (const file of files) {
         if (file.endsWith(".yaml") || file.endsWith(".yml")) {
           const content = await readFile(join(templateDir, file), "utf-8");
-          const template = yaml.load(content) as DiagnosticTemplate;
+          const template = load(content) as DiagnosticTemplate;
           if (template?.id && template?.signals) {
             this.templates.push(template);
           }
