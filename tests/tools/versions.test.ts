@@ -27,4 +27,9 @@ describe("getVersions", () => {
     expect(text).toContain("Client Version:");
     expect(text).toContain("1.31.2");
   });
+
+  it("does not print a proxy count the versions file does not record", () => {
+    const text = (getVersions(store).content[0] as { type: "text"; text: string }).text;
+    expect(text).not.toContain("(0 proxies)");
+  });
 });

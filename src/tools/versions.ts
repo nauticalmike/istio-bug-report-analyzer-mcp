@@ -15,7 +15,7 @@ export function getVersions(store: BugReportStore) {
     ...versions.controlPlaneVersions.map((v) => `  - ${v.version} (revision: ${v.revision})`),
     "",
     "Data Plane Versions:",
-    ...versions.proxyVersions.map((v) => `  - ${v.version} (${v.count} proxies)`),
+    ...versions.proxyVersions.map((v) => `  - ${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`),
     "",
     `Raw version output:`,
     versions.raw,

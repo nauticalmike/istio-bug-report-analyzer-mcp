@@ -28,7 +28,7 @@ export async function getOverview(store: BugReportStore) {
     "",
     `Istio Version: ${versions?.clientVersion ?? "unknown"}`,
     `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}`,
-    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version} (${v.count} proxies)`).join(", ") || "unknown"}`,
+    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}`,
     `Data Plane Mode: ${modeInfo.mode} (${modeCounts.join(", ")})`,
     ...(modeInfo.ambientNamespaces.length > 0 ? [`  Ambient namespaces: ${modeInfo.ambientNamespaces.join(", ")}`] : []),
     ...(modeInfo.sidecarNamespaces.length > 0 ? [`  Sidecar namespaces: ${modeInfo.sidecarNamespaces.join(", ")}`] : []),
