@@ -44,11 +44,12 @@ export async function loadBugReport(
         cluster: {
           context: null,
           kubeVersion: null,
-          k8sResources: store.getClusterResources(),
+          // Getters: the cluster dump is parsed on first access, not at load.
+          get k8sResources() { return store.getClusterResources(); },
           customResources: [],
           events: null,
-          nodes: store.getClusterResources({ kind: "Node" }),
-          pods: store.getClusterResources({ kind: "Pod" }),
+          get nodes() { return store.getClusterResources({ kind: "Node" }); },
+          get pods() { return store.getClusterResources({ kind: "Pod" }); },
           secrets: [],
         },
         proxies: new Map(),
