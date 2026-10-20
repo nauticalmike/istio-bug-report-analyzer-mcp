@@ -238,4 +238,16 @@ describe("BugReportStore cluster resource dedup", () => {
     expect(store.getClusterResources({ kind: "CustomResourceDefinition" }).length).toBe(1);
     expect(store.detectDataPlaneMode().ambientNamespaces).toEqual(["ambient-demo"]);
   });
+
+  it("ensureClusterResources reads asynchronously once and matches the sync path", async () => {
+    const archiveDir = join(tempDir, "bug-report-async-cluster");
+    await createMinimalArchive(archiveDir);
+    const asyncStore = await BugReportStore.fromDirectory(archiveDir);
+    const syncStore = await BugReportStore.fromDirectory(archiveDir);
+
+    const [a, b] = await Promise.all([asyncStore.ensureClusterResources(), asyncStore.ensureClusterResources()]);
+    expect(a).toBe(b);
+    expect(asyncStore.getClusterResources()).toBe(a);
+    expect(a).toEqual(syncStore.getClusterResources());
+  });
 });
