@@ -1,15 +1,30 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+// Mirrors the `versions` file istioctl bug-report 1.30+ writes (Go %#v dumps).
+export function bugReportVersions(version: string, revision = "default"): string {
+  const buildInfo = (golang: string) =>
+    `version.BuildInfo{Version:"${version}", GitRevision:"0000000000000000000000000000000000000000", GolangVersion:"${golang}", BuildStatus:"Clean", GitTag:"${version}"}`;
+  const serverInfo = `version.ServerInfo{Component:"pilot", Revision:"${revision}", Info:${buildInfo("")}}`;
+  return [
+    "CLI version:",
+    buildInfo("go1.25.1"),
+    "",
+    "✅ The following Istio control plane revisions/versions were found in the cluster:",
+    `Revision ${revision}:`,
+    `&version.MeshInfo{${serverInfo}}`,
+    "",
+    "✅ The following proxy revisions/versions were found in the cluster:",
+    `Revision ${revision}: Versions {${version}}`,
+    "",
+  ].join("\n");
+}
+
 export async function createMinimalArchive(basePath: string): Promise<void> {
   await mkdir(basePath, { recursive: true });
 
   // Root files
-  await writeFile(join(basePath, "versions"), [
-    "client version: 1.29.1",
-    "control plane version: 1.29.1",
-    "data plane version: 1.29.1 (2 proxies)",
-  ].join("\n"));
+  await writeFile(join(basePath, "versions"), bugReportVersions("1.31.2"));
 
   await writeFile(join(basePath, "bug-report.log"), "bug-report log content\n");
 
@@ -33,7 +48,7 @@ export async function createMinimalArchive(basePath: string): Promise<void> {
   await writeFile(join(proxyDir, "clusters"), "test-cluster::10.0.0.1:8080::cx_active::5\n");
   await writeFile(join(proxyDir, "listeners"), "LISTENER              CHAIN  DESTINATION\n0.0.0.0:15006         Inbound  Cluster: inbound|8080\n");
   await writeFile(join(proxyDir, "memory"), "allocated: 15MB\nheap_size: 30MB\n");
-  await writeFile(join(proxyDir, "server_info"), '{"version":"1.29.1","state":"LIVE"}\n');
+  await writeFile(join(proxyDir, "server_info"), '{"version":"1.31.2","state":"LIVE"}\n');
 
   const configDump = {
     configs: [

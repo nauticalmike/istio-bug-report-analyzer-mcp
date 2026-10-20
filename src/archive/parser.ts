@@ -55,6 +55,11 @@ export function parseVersionsFile(content: string): VersionInfo {
     proxyVersions: [],
   };
 
+  if (/^CLI version:/m.test(content)) {
+    parseBugReportVersions(content, result);
+    return result;
+  }
+
   for (const line of content.split("\n")) {
     const lower = line.toLowerCase().trim();
 
@@ -81,6 +86,63 @@ export function parseVersionsFile(content: string): VersionInfo {
   }
 
   return result;
+}
+
+const BUILD_INFO_VERSION_RE = /BuildInfo\{Version:"([^"]*)"/g;
+
+// bug-report records no per-version proxy counts, so count 0 means "unknown".
+function parseBugReportVersions(content: string, result: VersionInfo): void {
+  type Section = "cli" | "cp" | "proxy" | null;
+  let section: Section = null;
+  let cpRevision: string | null = null;
+  const cpSeen = new Set<string>();
+  const proxySeen = new Set<string>();
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+
+    if (/^CLI version:/.test(line)) {
+      section = "cli";
+      continue;
+    }
+    if (/control plane revisions\/versions were found/.test(line)) {
+      section = "cp";
+      cpRevision = null;
+      continue;
+    }
+    if (/proxy revisions\/versions were found/.test(line)) {
+      section = "proxy";
+      continue;
+    }
+
+    if (section === "cli") {
+      if (result.clientVersion === null) {
+        const m = /BuildInfo\{Version:"([^"]*)"/.exec(line);
+        if (m && m[1]) result.clientVersion = m[1];
+      }
+    } else if (section === "cp") {
+      const rev = /^Revision (.+?):\s*$/.exec(line);
+      if (rev) {
+        cpRevision = rev[1];
+        continue;
+      }
+      if (cpRevision === null) continue;
+      for (const m of line.matchAll(BUILD_INFO_VERSION_RE)) {
+        const key = `${cpRevision}\u0000${m[1]}`;
+        if (!m[1] || cpSeen.has(key)) continue;
+        cpSeen.add(key);
+        result.controlPlaneVersions.push({ revision: cpRevision, version: m[1] });
+      }
+    } else if (section === "proxy") {
+      const m = /^Revision .+?: Versions \{(.*)\}\s*$/.exec(line);
+      if (!m) continue;
+      for (const v of m[1].split(",").map((s) => s.trim())) {
+        if (!v || proxySeen.has(v)) continue;
+        proxySeen.add(v);
+        result.proxyVersions.push({ version: v, count: 0 });
+      }
+    }
+  }
 }
 
 export function tryParseJson(content: string): unknown | null {

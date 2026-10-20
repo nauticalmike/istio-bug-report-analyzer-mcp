@@ -52,8 +52,67 @@ describe("parseAnalyzeOutput", () => {
   });
 });
 
+const bi = (v: string, golang = "") =>
+  `version.BuildInfo{Version:"${v}", GitRevision:"0000000000000000000000000000000000000000", GolangVersion:"${golang}", BuildStatus:"Clean", GitTag:"${v}"}`;
+
 describe("parseVersionsFile", () => {
-  it("extracts client, control plane, and data plane versions", () => {
+  it("parses istioctl 1.31 bug-report output with revisions and replicas", () => {
+    const input = [
+      "CLI version:",
+      bi("1.31.2", "go1.25.1"),
+      "",
+      "✅ The following Istio control plane revisions/versions were found in the cluster:",
+      "Revision 1-31:",
+      `&version.MeshInfo{version.ServerInfo{Component:"pilot", Revision:"1-31", Info:${bi("1.31.2")}}, version.ServerInfo{Component:"pilot", Revision:"1-31", Info:${bi("1.31.2")}}}`,
+      "",
+      "Revision 1-30:",
+      `&version.MeshInfo{version.ServerInfo{Component:"pilot", Revision:"1-30", Info:${bi("1.30.6")}}}`,
+      "",
+      "✅ The following proxy revisions/versions were found in the cluster:",
+      "Revision 1-31: Versions {1.31.2, 1.30.6}",
+      "Revision 1-30: Versions {1.30.6}",
+      "",
+    ].join("\n");
+    const v = parseVersionsFile(input);
+    expect(v.clientVersion).toBe("1.31.2");
+    expect(v.controlPlaneVersions).toEqual([
+      { revision: "1-31", version: "1.31.2" },
+      { revision: "1-30", version: "1.30.6" },
+    ]);
+    expect(v.proxyVersions).toEqual([
+      { version: "1.31.2", count: 0 },
+      { version: "1.30.6", count: 0 },
+    ]);
+  });
+
+  it("parses pre-1.30 output with pretty-printed MeshInfo and error revisions", () => {
+    const input = [
+      "CLI version:",
+      bi("1.30.2-solo", "go1.24.6"),
+      "",
+      "The following Istio control plane revisions/versions were found in the cluster:",
+      "Revision default:",
+      "&version.MeshInfo{",
+      "    {",
+      '        Component: "pilot",',
+      '        Revision:  "default",',
+      `        Info:      ${bi("1.29.9-solo")},`,
+      "    },",
+      "}",
+      "",
+      "Revision canary:",
+      'no running Istio pods in namespace "istio-system"',
+      "",
+      "The following proxy revisions/versions were found in the cluster:",
+      "Revision default: Versions {1.29.9-solo}",
+    ].join("\r\n");
+    const v = parseVersionsFile(input);
+    expect(v.clientVersion).toBe("1.30.2-solo");
+    expect(v.controlPlaneVersions).toEqual([{ revision: "default", version: "1.29.9-solo" }]);
+    expect(v.proxyVersions).toEqual([{ version: "1.29.9-solo", count: 0 }]);
+  });
+
+  it("extracts versions from the legacy single-line format", () => {
     const input = "client version: 1.29.1\ncontrol plane version: 1.29.1\ndata plane version: 1.29.1 (2 proxies)\n";
     const v = parseVersionsFile(input);
     expect(v.clientVersion).toBe("1.29.1");
