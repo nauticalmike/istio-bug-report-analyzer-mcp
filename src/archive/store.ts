@@ -104,6 +104,7 @@ export class BugReportStore {
   private versions: VersionInfo | null = null;
   private analyzeResults: AnalyzeResult[] = [];
   private proxies = new Map<string, ProxyInfo[]>();
+  private proxyFiles = new Map<string, Map<string, string>>(); // "ns/pod" -> subpath -> absPath
   private istiodPods = new Map<string, IstiodInfo[]>();
   private clusterResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
@@ -160,6 +161,7 @@ export class BugReportStore {
       if (!proxyFiles.has(key)) proxyFiles.set(key, new Map());
       proxyFiles.get(key)!.set(parts.slice(3).join("/"), file.absolutePath);
     }
+    this.proxyFiles = proxyFiles;
     for (const [key, files] of proxyFiles) {
       const [ns, pod] = key.split("/");
       if (!this.proxies.has(ns)) this.proxies.set(ns, []);
@@ -238,15 +240,28 @@ export class BugReportStore {
     if (!proxy) return null;
 
     if (!section || section === "all" || section === "config_dump") return proxy.configDump;
-    const sectionMap: Record<string, unknown> = {
-      listeners: proxy.listeners,
-      clusters: proxy.clusters,
-      certs: proxy.certs,
-      memory: proxy.memory,
-      server_info: proxy.serverInfo,
-      stats: proxy.statsPrometheus,
-    };
-    return sectionMap[section] ?? null;
+    // Read only the requested section: every ProxyInfo field is a lazy disk read.
+    switch (section) {
+      case "listeners": return proxy.listeners;
+      case "clusters": return proxy.clusters;
+      case "certs": return proxy.certs;
+      case "memory": return proxy.memory;
+      case "server_info": return proxy.serverInfo;
+      case "stats": return proxy.statsPrometheus;
+      default: return null;
+    }
+  }
+
+  /** Sections get_proxy_config can return for a pod, from the file index (no reads); null if the pod is unknown. */
+  getProxySections(namespace: string, pod: string): string[] | null {
+    const files = this.proxyFiles.get(`${namespace}/${pod}`);
+    if (!files) return null;
+    const sections: string[] = [];
+    if (files.has("config_dump?include_eds") || files.has("config_dump")) sections.push("config_dump");
+    for (const [section, file] of Object.entries(PROXY_SECTION_FILES)) {
+      if (files.has(file)) sections.push(section);
+    }
+    return sections;
   }
 
   getIstiodPods(namespace?: string): IstiodInfo[] {
@@ -337,6 +352,15 @@ export class BugReportStore {
     return this.cachedModeInfo;
   }
 }
+
+const PROXY_SECTION_FILES: Record<string, string> = {
+  listeners: "listeners",
+  clusters: "clusters",
+  certs: "certs",
+  memory: "memory",
+  server_info: "server_info",
+  stats: "stats/prometheus",
+};
 
 function classifyProxyType(podName: string): ProxyType {
   if (podName.startsWith("ztunnel-")) return "ztunnel";
