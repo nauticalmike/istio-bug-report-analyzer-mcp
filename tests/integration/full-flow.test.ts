@@ -31,8 +31,8 @@ describe("Full analysis flow", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("overview returns structured data", () => {
-    const result = getOverview(store);
+  it("overview returns structured data", async () => {
+    const result = await getOverview(store);
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Istio Mesh Overview");
     expect(text).toContain("1.29.1");
@@ -74,8 +74,8 @@ describe("Full analysis flow", () => {
     expect(text).toContain("Connection refused");
   });
 
-  it("istiod debug returns syncz", () => {
-    const result = getIstiodDebug(store, { endpoint: "syncz" });
+  it("istiod debug returns syncz", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "syncz" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("SYNCED");
   });

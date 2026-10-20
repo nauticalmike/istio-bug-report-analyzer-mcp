@@ -1,6 +1,7 @@
 import type { BugReportStore } from "../archive/store.js";
+import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
-export function getOverview(store: BugReportStore) {
+export async function getOverview(store: BugReportStore) {
   const versions = store.getVersions();
   const analyzeResults = store.getAnalyzeResults();
   const proxyPods = store.getProxyPods();
@@ -39,6 +40,8 @@ export function getOverview(store: BugReportStore) {
     "",
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
   ];
+  const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+  if (issueLines.length > 0) lines.push("", ...issueLines);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
 }

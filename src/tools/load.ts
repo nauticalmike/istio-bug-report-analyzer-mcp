@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { BugReportStore } from "../archive/store.js";
 import { extractArchive } from "../archive/extractor.js";
 import type { Session } from "../types.js";
+import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
 export async function loadBugReport(
   { path }: { path: string },
@@ -76,9 +77,11 @@ export async function loadBugReport(
       `Proxies: ${proxyPods.length} pods`,
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
-    ].join("\n");
+    ];
+    const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+    if (issueLines.length > 0) summary.push("", ...issueLines);
 
-    return { content: [{ type: "text" as const, text: summary }] };
+    return { content: [{ type: "text" as const, text: summary.join("\n") }] };
   } catch (error) {
     return {
       content: [{ type: "text" as const, text: `Error loading bug report: ${error instanceof Error ? error.message : String(error)}` }],
