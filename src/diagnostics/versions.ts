@@ -43,7 +43,8 @@ export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
       Math.abs(g) < Math.abs(best) || (Math.abs(g) === Math.abs(best) && g > 0) ? g : best,
     );
     const cp = cpMinors[gaps.indexOf(closest)];
-    const subject = `${proxy.count} prox${proxy.count === 1 ? "y" : "ies"} on ${proxy.version}, control plane ${label(cp)}`;
+    const proxies = proxy.count > 0 ? `${proxy.count} prox${proxy.count === 1 ? "y" : "ies"}` : "proxies";
+    const subject = `${proxies} on ${proxy.version}, control plane ${label(cp)}`;
     if (closest < 0) {
       issues.push({ kind: "data-plane-ahead", detail: `${subject}: data plane is ahead of the control plane (unsupported)` });
     } else if (closest > 1) {
@@ -65,6 +66,8 @@ export function findUnsupportedVersions(versions: VersionInfo | null, supported:
 
   const issues: VersionIssue[] = [];
   for (const { role, version } of checks) {
+    // Solo builds follow Solo's own (longer) support policy, not the upstream window.
+    if (version?.includes("-solo")) continue;
     const m = parseMinor(version);
     if (!m || supportedSet.has(label(m))) continue;
     issues.push({

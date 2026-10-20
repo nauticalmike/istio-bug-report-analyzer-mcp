@@ -48,6 +48,14 @@ describe("findVersionSkew", () => {
   it("names the proxy count and versions in the detail", () => {
     expect(findVersionSkew(info(["1.31.2"], ["1.30.6"]))[0].detail).toContain("3 proxies on 1.30.6, control plane 1.31");
   });
+
+  it("omits the proxy count when the archive does not record it", () => {
+    const versions = info(["1.31.2"], ["1.30.6"]);
+    versions.proxyVersions[0].count = 0;
+    const detail = findVersionSkew(versions)[0].detail;
+    expect(detail).toContain("proxies on 1.30.6, control plane 1.31");
+    expect(detail).not.toMatch(/\b0 prox/);
+  });
 });
 
 describe("findUnsupportedVersions", () => {
@@ -59,6 +67,10 @@ describe("findUnsupportedVersions", () => {
       expect.stringContaining("client (istioctl) 1.28.3"),
       expect.stringContaining("control plane (default) 1.29.9"),
     ]);
+  });
+
+  it("does not apply the upstream window to Solo builds", () => {
+    expect(findUnsupportedVersions(info(["1.28.4-solo"], [], "1.28.4-solo"), supported)).toEqual([]);
   });
 
   it("ignores supported and unparsable versions", () => {
