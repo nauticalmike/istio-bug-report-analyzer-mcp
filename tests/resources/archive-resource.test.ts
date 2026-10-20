@@ -31,7 +31,7 @@ describe("archive resource tools", () => {
   it("gets raw file content", async () => {
     const result = await getRawFile(store, "versions");
     const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
   });
 
   it("returns error for missing file", async () => {

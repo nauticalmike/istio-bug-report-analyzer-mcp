@@ -25,7 +25,7 @@ describe("getOverview", () => {
     const result = getOverview(store);
     expect(result.content[0].type).toBe("text");
     const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
     expect(text).toContain("Proxies:");
     expect(text).toContain("Analyze Results:");
   });

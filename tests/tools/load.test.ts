@@ -35,7 +35,7 @@ describe("loadBugReport", () => {
     expect(result.content[0].type).toBe("text");
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Bug report loaded successfully");
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
     expect(session).not.toBeNull();
     expect(session!.id).toMatch(/^session-/);
     expect(store).not.toBeNull();
