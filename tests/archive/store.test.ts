@@ -217,4 +217,25 @@ describe("BugReportStore cluster resource dedup", () => {
     expect(store.getClusterResources({ kind: "Node" }).length).toBe(1);
     expect(store.getClusterResources({ kind: "Pod" }).length).toBe(1);
   });
+
+  it("includes cluster-scoped objects from cluster/k8s-cluster-resources (istioctl 1.30+)", async () => {
+    const archiveDir = join(tempDir, "bug-report-cluster-scoped");
+    const clusterDir = join(archiveDir, "cluster");
+    await mkdir(clusterDir, { recursive: true });
+
+    const node = "- apiVersion: v1\n  kind: Node\n  metadata:\n    name: node-1\n";
+    const ambientNs =
+      "- apiVersion: v1\n  kind: Namespace\n  metadata:\n    name: ambient-demo\n    labels:\n      istio.io/dataplane-mode: ambient\n";
+    const crd =
+      "- apiVersion: apiextensions.k8s.io/v1\n  kind: CustomResourceDefinition\n  metadata:\n    name: gateways.networking.istio.io\n";
+    await writeFile(join(clusterDir, "k8s-resources"), "apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Pod\n  metadata:\n    name: p\n    namespace: ambient-demo\n");
+    await writeFile(join(clusterDir, "k8s-cluster-resources"), `apiVersion: v1\nkind: List\nitems:\n${node}${ambientNs}${crd}`);
+    await writeFile(join(clusterDir, "nodes"), `apiVersion: v1\nkind: List\nitems:\n${node}`);
+
+    const store = await BugReportStore.fromDirectory(archiveDir);
+
+    expect(store.getClusterResources({ kind: "Node" }).length).toBe(1);
+    expect(store.getClusterResources({ kind: "CustomResourceDefinition" }).length).toBe(1);
+    expect(store.detectDataPlaneMode().ambientNamespaces).toEqual(["ambient-demo"]);
+  });
 });

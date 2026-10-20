@@ -82,10 +82,17 @@ class LazyDebugEndpoints extends Map<string, unknown> {
   }
 }
 
-// `cluster/k8s-resources` is a full dump; `cluster/nodes` and `cluster/pods`
-// are dedicated subsets of the same objects, so one resource can appear in
-// more than one file and is deduplicated by identity.
-const CLUSTER_DUMP_FILES = ["cluster/k8s-resources", "cluster/crs", "cluster/nodes", "cluster/pods"];
+// `cluster/k8s-resources` holds namespaced objects and (istioctl 1.30+)
+// `cluster/k8s-cluster-resources` the cluster-scoped ones: Namespaces, Nodes,
+// CRDs, webhooks. `cluster/nodes` and `cluster/pods` are subsets of those, so
+// one resource can appear in more than one file and is deduplicated by identity.
+const CLUSTER_DUMP_FILES = [
+  "cluster/k8s-resources",
+  "cluster/k8s-cluster-resources",
+  "cluster/crs",
+  "cluster/nodes",
+  "cluster/pods",
+];
 
 function resourceKey(r: ParsedResource): string {
   return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
