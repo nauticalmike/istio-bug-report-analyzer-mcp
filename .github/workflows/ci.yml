@@ -18,7 +18,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
-          cache: npm
+          # Caching runs the bundled npm in the repo before the upgrade below, which devEngines rejects.
+          package-manager-cache: false
       # npm 10 crashes in arborist (#loadPeerSet) on this tree; package.json devEngines requires >=11.21.
       - run: npm install -g npm@11.21.1
       - run: npm ci
