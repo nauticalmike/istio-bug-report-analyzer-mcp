@@ -38,16 +38,16 @@ Then restart Claude Code to pick up the new skill.
 | Tool | Description |
 |------|-------------|
 | `collect_bug_report` | Run `istioctl bug-report` against a cluster and load results |
-| `load_bug_report` | Load an existing archive or directory |
-| `get_overview` | High-level mesh overview |
+| `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` |
+| `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop) and collection issues |
 | `get_versions` | Version matrix with skew detection |
 | `get_analyze_results` | `istioctl analyze` results (IST codes) |
-| `get_cluster_resources` | Query K8s resources by kind/namespace/name |
-| `get_proxy_config` | Envoy proxy configuration for a pod |
-| `get_logs` | Component logs with filtering |
-| `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.) |
-| `run_diagnostics` | Run diagnostic templates against the archive |
-| `find_errors` | Scan logs for errors, deduplicate by pattern |
+| `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects |
+| `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel |
+| `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering |
+| `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected |
+| `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive |
+| `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
 | `list_files` | List all files in the archive |
 | `get_raw_file` | Read any file from the archive |
@@ -76,11 +76,19 @@ The `estimate_resource_savings` tool analyzes the mesh's infrastructure footprin
 
 The tool extracts actual resource requests from Pod specs when available, falling back to Istio defaults. It also flags optimization opportunities like over-provisioned sidecars and high-density namespaces.
 
+## Supported Istio Versions
+
+Archives from `istioctl bug-report` 1.18 through 1.31 load, including the flat (1.30+) and wrapped tar layouts. Validated end to end against Istio 1.31.2 on a mixed ambient + sidecar mesh (sidecars, ztunnel, waypoint).
+
+The EOL check (`DIAG-006`) follows the upstream support window (currently 1.30 and 1.31; the list lives in `templates/DIAG-006-unsupported-version.yaml`). Solo builds (`-solo`) follow Solo's own support policy and are not flagged.
+
 ## Solo.io Integration
 
 Set `SOLO_MODE=true` to enable integration with Solo.io internal tools (docs, KB, support agent, Zendesk, Slack) for enriched analysis.
 
 ## Development
+
+Requires Node.js 22.12+ and npm 11.21+ (`npm install -g npm@11.21.1`). npm 10 crashes resolving this dependency tree ([npm/cli#9770](https://github.com/npm/cli/pull/9770)), so `devEngines` refuses older versions.
 
 ```bash
 # Install dependencies
