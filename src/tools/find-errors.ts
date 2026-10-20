@@ -1,4 +1,5 @@
 import type { BugReportStore } from "../archive/store.js";
+import { readFileComponentLogs } from "./component-logs.js";
 
 interface ErrorGroup {
   pattern: string;
@@ -7,7 +8,7 @@ interface ErrorGroup {
   examples: string[];
 }
 
-export function findErrors(
+export async function findErrors(
   store: BugReportStore,
   params: { severity?: string; component?: string; keyword?: string },
 ) {
@@ -33,6 +34,17 @@ export function findErrors(
       for (const line of discoveryLog.split("\n")) {
         if (line.trim() && severityRe.test(line)) {
           errorLines.push({ component: `istiod/${pod.namespace}/${pod.podName}`, line: line.trim() });
+        }
+      }
+    }
+  }
+
+  for (const component of ["cni", "operator"] as const) {
+    if (params.component && params.component !== component && params.component !== "all") continue;
+    for (const { source, content } of await readFileComponentLogs(store, component)) {
+      for (const line of content.split("\n")) {
+        if (line.trim() && severityRe.test(line)) {
+          errorLines.push({ component: source, line: line.trim() });
         }
       }
     }

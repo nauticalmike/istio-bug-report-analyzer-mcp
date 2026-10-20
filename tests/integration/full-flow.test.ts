@@ -68,8 +68,8 @@ describe("Full analysis flow", () => {
     expect(text).toContain("BootstrapConfigDump");
   });
 
-  it("logs returns filtered content", () => {
-    const result = getLogs(store, { component: "proxy", keyword: "error" });
+  it("logs returns filtered content", async () => {
+    const result = await getLogs(store, { component: "proxy", keyword: "error" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Connection refused");
   });
@@ -80,8 +80,8 @@ describe("Full analysis flow", () => {
     expect(text).toContain("SYNCED");
   });
 
-  it("find_errors locates error patterns", () => {
-    const result = findErrors(store, {});
+  it("find_errors locates error patterns", async () => {
+    const result = await findErrors(store, {});
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("unique");
   });
