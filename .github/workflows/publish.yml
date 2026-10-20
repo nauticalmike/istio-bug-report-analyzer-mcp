@@ -12,13 +12,16 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      # No dependency cache in the release job: a poisoned cache would ship in the package.
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
-          cache: npm
+          node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm 10 crashes in arborist (#loadPeerSet) on this tree; package.json devEngines requires >=11.21.
+      - run: npm install -g npm@11.21.1
       - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
       - run: npm run build
       - run: npm test
       - run: npm publish --access public --provenance

@@ -1,5 +1,8 @@
-import yaml from "js-yaml";
+import { load, CORE_SCHEMA, mergeTag } from "js-yaml";
 import type { AnalyzeResult, VersionInfo, ParsedResource } from "../types.js";
+
+// js-yaml 5 dropped `<<` merge keys from its default schema; keep them for hand-written resources.
+const K8S_SCHEMA = CORE_SCHEMA.withTags(mergeTag);
 
 export function parseYamlMultiDoc(content: string): ParsedResource[] {
   const docs: ParsedResource[] = [];
@@ -8,7 +11,7 @@ export function parseYamlMultiDoc(content: string): ParsedResource[] {
     const trimmed = raw.trim();
     if (!trimmed) continue;
     try {
-      const parsed = yaml.load(trimmed);
+      const parsed = load(trimmed, { schema: K8S_SCHEMA });
       if (parsed && typeof parsed === "object") {
         const obj = parsed as Record<string, unknown>;
         // Unwrap Kubernetes List objects (apiVersion: v1, kind: *List, items: [...])
