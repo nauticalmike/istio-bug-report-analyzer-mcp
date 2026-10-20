@@ -35,7 +35,7 @@ describe("Full analysis flow", () => {
     const result = getOverview(store);
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Istio Mesh Overview");
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
     expect(text).toContain("Proxies: 1");
     expect(text).toContain("Istiod: 1");
   });
@@ -43,7 +43,7 @@ describe("Full analysis flow", () => {
   it("versions detects no skew in fixture", () => {
     const result = getVersions(store);
     const text = (result.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
     expect(text).not.toContain("VERSION SKEW");
   });
 
@@ -93,7 +93,7 @@ describe("Full analysis flow", () => {
 
     const rawResult = await getRawFile(store, "versions");
     const rawText = (rawResult.content[0] as { type: "text"; text: string }).text;
-    expect(rawText).toContain("1.29.1");
+    expect(rawText).toContain("1.31.2");
   });
 
   it("diagnostic engine fires matching templates", async () => {

@@ -66,7 +66,7 @@ describe("BugReportStore large archive load", () => {
     expect(summary.podCount).toBe(DEFAULT_LARGE_OPTIONS.podCount);
     expect(summary.hasMarker).toBe(true);
     expect(summary.syncedProxy).toBe("synthetic-pod-0.load-test");
-    expect(summary.version).toBe("1.30.0");
+    expect(summary.version).toBe("1.31.2");
     // Loading must not retain file contents: the index of a 400MB archive is
     // a few MB. Half the heap cap leaves generous slack without letting an
     // eager loader sneak by.

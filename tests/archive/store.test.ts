@@ -23,7 +23,7 @@ describe("BugReportStore", () => {
 
   it("loads version info", () => {
     expect(store.getVersions()).not.toBeNull();
-    expect(store.getVersions()!.clientVersion).toBe("1.29.1");
+    expect(store.getVersions()!.clientVersion).toBe("1.31.2");
   });
 
   it("loads analyze results", () => {
@@ -55,7 +55,7 @@ describe("BugReportStore", () => {
 
   it("returns raw file by relative path", async () => {
     const content = await store.getRawFile("versions");
-    expect(content).toContain("1.29.1");
+    expect(content).toContain("1.31.2");
   });
 
   it("returns null for missing files", async () => {

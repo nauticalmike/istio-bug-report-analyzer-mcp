@@ -25,6 +25,6 @@ describe("getVersions", () => {
     const result = getVersions(store);
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Client Version:");
-    expect(text).toContain("1.29.1");
+    expect(text).toContain("1.31.2");
   });
 });

@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { bugReportVersions } from "./create-fixture.js";
 
 export interface LargeArchiveOptions {
   /** Number of proxy pods to generate. */
@@ -39,11 +40,7 @@ export async function createLargeArchive(
 ): Promise<void> {
   await mkdir(basePath, { recursive: true });
 
-  await writeFile(join(basePath, "versions"), [
-    "client version: 1.30.0",
-    "control plane version: 1.30.0",
-    `data plane version: 1.30.0 (${options.podCount} proxies)`,
-  ].join("\n"));
+  await writeFile(join(basePath, "versions"), bugReportVersions("1.31.2"));
 
   const clusterDir = join(basePath, "cluster");
   await mkdir(clusterDir, { recursive: true });
