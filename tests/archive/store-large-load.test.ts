@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { spawnSync, execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { createLargeArchive, DEFAULT_LARGE_OPTIONS } from "../fixtures/create-large-fixture.js";
+import { createLargeArchive, clusterDumpPodCount, DEFAULT_LARGE_OPTIONS } from "../fixtures/create-large-fixture.js";
 
 const REPO_ROOT = resolve(__dirname, "..", "..");
 
@@ -32,6 +32,13 @@ describe("BugReportStore large archive load", () => {
     await writeFile(childScript, `
       import { BugReportStore } from ${JSON.stringify(join(REPO_ROOT, "dist", "archive", "store.js"))};
       const store = await BugReportStore.fromDirectory(process.argv[2]);
+      if (process.argv[3] === "cluster") {
+        console.log(JSON.stringify({
+          pods: store.getClusterResources({ kind: "Pod" }).length,
+          namespaces: store.getClusterResources({ kind: "Namespace" }).length,
+        }));
+        process.exit(0);
+      }
       const pods = store.getProxyPods("load-test");
       const heapAfterLoadMb = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
       const logs = store.getProxyLogs("load-test", "synthetic-pod-0");
@@ -71,5 +78,18 @@ describe("BugReportStore large archive load", () => {
     // a few MB. Half the heap cap leaves generous slack without letting an
     // eager loader sneak by.
     expect(summary.heapAfterLoadMb).toBeLessThan(CHILD_HEAP_MB / 2);
+  }, 180_000);
+
+  it("parses the large cluster dump on first access", () => {
+    // No heap cap: this checks lazy parsing still returns every resource.
+    const child = spawnSync(process.execPath, [childScript, archiveDir, "cluster"], {
+      encoding: "utf-8",
+      timeout: 120_000,
+    });
+    expect(child.status, `stderr:\n${child.stderr?.slice(-2000)}`).toBe(0);
+
+    const summary = JSON.parse(child.stdout.trim().split("\n").pop()!);
+    expect(summary.pods).toBe(clusterDumpPodCount(DEFAULT_LARGE_OPTIONS.clusterDumpMb));
+    expect(summary.namespaces).toBe(2);
   }, 180_000);
 });

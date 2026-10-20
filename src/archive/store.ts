@@ -54,6 +54,48 @@ class LazyDebugEndpoints extends Map<string, unknown> {
     super.set(endpoint, value);
     return value;
   }
+
+  // Iterating values must never expose UNLOADED, so it loads every endpoint
+  // first. That can be hundreds of MB: prefer keys() + get() for one endpoint.
+  private loadEvery(): void {
+    for (const endpoint of super.keys()) this.get(endpoint);
+  }
+
+  override values() {
+    this.loadEvery();
+    return super.values();
+  }
+
+  override entries() {
+    this.loadEvery();
+    return super.entries();
+  }
+
+  override [Symbol.iterator]() {
+    this.loadEvery();
+    return super[Symbol.iterator]();
+  }
+
+  override forEach(callback: (value: unknown, key: string, map: Map<string, unknown>) => void, thisArg?: unknown): void {
+    this.loadEvery();
+    super.forEach(callback, thisArg);
+  }
+}
+
+// `cluster/k8s-resources` holds namespaced objects and (istioctl 1.30+)
+// `cluster/k8s-cluster-resources` the cluster-scoped ones: Namespaces, Nodes,
+// CRDs, webhooks. `cluster/nodes` and `cluster/pods` are subsets of those, so
+// one resource can appear in more than one file and is deduplicated by identity.
+const CLUSTER_DUMP_FILES = [
+  "cluster/k8s-resources",
+  "cluster/k8s-cluster-resources",
+  "cluster/crs",
+  "cluster/nodes",
+  "cluster/pods",
+];
+
+function resourceKey(r: ParsedResource): string {
+  return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
 }
 
 export class BugReportStore {
@@ -63,7 +105,7 @@ export class BugReportStore {
   private analyzeResults: AnalyzeResult[] = [];
   private proxies = new Map<string, ProxyInfo[]>();
   private istiodPods = new Map<string, IstiodInfo[]>();
-  private clusterResources: ParsedResource[] = [];
+  private clusterResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
 
   private constructor(index: ArchiveIndex) {
@@ -106,25 +148,7 @@ export class BugReportStore {
       }
     }
 
-    // Cluster dumps are parsed one file at a time; each raw string goes out
-    // of scope immediately so only the parsed objects are retained.
-    // `cluster/k8s-resources` is a full dump; `cluster/nodes` and
-    // `cluster/pods` are dedicated subsets of the same objects, so the same
-    // resource can appear in more than one file. Deduplicate by identity to
-    // prevent inflated counts and double-summed resource aggregates.
-    const seenResources = new Set<string>();
-    const resourceKey = (r: ParsedResource): string =>
-      `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
-    for (const file of ["cluster/k8s-resources", "cluster/crs", "cluster/nodes", "cluster/pods"]) {
-      const content = await this.readFileContent(file);
-      if (!content) continue;
-      for (const resource of parseYamlMultiDoc(content)) {
-        const key = resourceKey(resource);
-        if (seenResources.has(key)) continue;
-        seenResources.add(key);
-        this.clusterResources.push(resource);
-      }
-    }
+    // Cluster dumps are not parsed here; see loadClusterResources().
 
     // Proxy and istiod pods are indexed only — no file contents are read
     // here. Their fields are lazy getters that hit the disk on access.
@@ -155,6 +179,29 @@ export class BugReportStore {
       if (!this.istiodPods.has(ns)) this.istiodPods.set(ns, []);
       this.istiodPods.get(ns)!.push(makeLazyIstiodInfo(ns, pod, files));
     }
+  }
+
+  /**
+   * Parses the cluster dumps on first use and caches the result. The parsed
+   * objects are several times the YAML size (a 78MB `k8s-resources` retains
+   * ~470MB of heap), so this cost is only paid by tools that need them.
+   */
+  private loadClusterResources(): ParsedResource[] {
+    if (this.clusterResources) return this.clusterResources;
+    const seen = new Set<string>();
+    const resources: ParsedResource[] = [];
+    for (const file of CLUSTER_DUMP_FILES) {
+      const content = readNow(this.pathIndex.get(file));
+      if (!content) continue;
+      for (const resource of parseYamlMultiDoc(content)) {
+        const key = resourceKey(resource);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        resources.push(resource);
+      }
+    }
+    this.clusterResources = resources;
+    return resources;
   }
 
   // === Public Query Methods ===
@@ -215,7 +262,7 @@ export class BugReportStore {
   }
 
   getClusterResources(filter?: { kind?: string; namespace?: string; name?: string }): ParsedResource[] {
-    let resources = this.clusterResources;
+    let resources = this.loadClusterResources();
     if (filter?.kind) {
       resources = resources.filter((r) => r.kind === filter.kind);
     }
@@ -249,7 +296,7 @@ export class BugReportStore {
     const hasSidecars = allProxies.some((p) => p.proxyType === "sidecar");
 
     // Check namespace labels for ambient mode
-    const namespaces = this.clusterResources.filter((r) => r.kind === "Namespace");
+    const namespaces = this.loadClusterResources().filter((r) => r.kind === "Namespace");
     const ambientNamespaces = namespaces
       .filter((ns) => ns.metadata?.labels?.["istio.io/dataplane-mode"] === "ambient")
       .map((ns) => ns.metadata.name);
@@ -312,7 +359,8 @@ function makeLazyProxyInfo(namespace: string, podName: string, files: Map<string
       return readNow(files.get("clusters"));
     },
     get configDump() {
-      const raw = readNow(files.get("config_dump?include_eds"));
+      // ztunnel (Rust) writes only plain `config_dump`; Envoy proxies write the EDS variant.
+      const raw = readNow(files.get("config_dump?include_eds") ?? files.get("config_dump"));
       return raw ? (tryParseJson(raw) as Record<string, unknown> | null) : null;
     },
     get listeners() {

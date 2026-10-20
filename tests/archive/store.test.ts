@@ -63,6 +63,113 @@ describe("BugReportStore", () => {
   });
 });
 
+describe("BugReportStore lazy cluster resources", () => {
+  let tempDir: string;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-lazy-cluster-test-"));
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not read cluster dumps at load, then parses once and caches", async () => {
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const dump = join(archiveDir, "cluster", "k8s-resources");
+    const store = await BugReportStore.fromDirectory(archiveDir);
+
+    // Rewriting the dump after load is only visible if load did not parse it.
+    await writeFile(dump, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: written-after-load\n");
+    expect(store.getClusterResources({ kind: "Namespace" }).map((r) => r.metadata.name)).toEqual([
+      "written-after-load",
+    ]);
+
+    await writeFile(dump, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: second-rewrite\n");
+    expect(store.getClusterResources({ kind: "Namespace" }).map((r) => r.metadata.name)).toEqual([
+      "written-after-load",
+    ]);
+    expect(store.detectDataPlaneMode().mode).toBe("sidecar");
+  });
+});
+
+describe("BugReportStore istiod debug endpoint iteration", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-debug-iter-test-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const debugDir = join(archiveDir, "istio", "istio-system", "istiod-abc", "debug");
+    await writeFile(join(debugDir, "plain"), "not json\n");
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const freshEndpoints = () => store.getIstiodPods("istio-system")[0].debugEndpoints;
+
+  it("never yields the internal placeholder from values, entries, forEach or spread", () => {
+    const fromValues = Array.from(freshEndpoints().values());
+    const fromEntries = Array.from(freshEndpoints().entries()).map(([, v]) => v);
+    const fromSpread = [...freshEndpoints()].map(([, v]) => v);
+    const fromForEach: unknown[] = [];
+    freshEndpoints().forEach((v) => fromForEach.push(v));
+
+    for (const values of [fromValues, fromEntries, fromSpread, fromForEach]) {
+      expect(values.length).toBeGreaterThanOrEqual(2);
+      expect(values.some((v) => typeof v === "symbol")).toBe(false);
+    }
+  });
+
+  it("iterates the same parsed values that get() returns", () => {
+    const endpoints = freshEndpoints();
+    for (const [key, value] of endpoints) {
+      expect(value).toBe(endpoints.get(key));
+    }
+    expect(endpoints.get("plain")).toBe("not json\n");
+    expect(Array.isArray(endpoints.get("syncz"))).toBe(true);
+  });
+});
+
+describe("BugReportStore proxy config_dump variants", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-config-dump-test-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    // istioctl 1.31: ztunnel pods carry only `config_dump`, Envoy pods `config_dump?include_eds`.
+    const ztunnelDir = join(archiveDir, "proxies", "istio-system", "ztunnel-c77st");
+    await mkdir(ztunnelDir, { recursive: true });
+    await writeFile(join(ztunnelDir, "config_dump"), JSON.stringify({ certificates: [], workloads: [] }));
+    await writeFile(join(ztunnelDir, "istio-proxy.log"), "info ztunnel started\n");
+    const sidecarDir = join(archiveDir, "proxies", "default", "both-variants");
+    await mkdir(sidecarDir, { recursive: true });
+    await writeFile(join(sidecarDir, "config_dump"), JSON.stringify({ variant: "plain" }));
+    await writeFile(join(sidecarDir, "config_dump?include_eds"), JSON.stringify({ variant: "eds" }));
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("falls back to plain config_dump for ztunnel pods", () => {
+    expect(store.getProxyPods("istio-system")[0].proxyType).toBe("ztunnel");
+    expect(store.getProxyConfig("istio-system", "ztunnel-c77st")).toEqual({ certificates: [], workloads: [] });
+  });
+
+  it("prefers config_dump?include_eds when both are present", () => {
+    expect(store.getProxyConfig("default", "both-variants")).toEqual({ variant: "eds" });
+  });
+});
+
 describe("BugReportStore cluster resource dedup", () => {
   let tempDir: string;
 
@@ -109,5 +216,26 @@ describe("BugReportStore cluster resource dedup", () => {
 
     expect(store.getClusterResources({ kind: "Node" }).length).toBe(1);
     expect(store.getClusterResources({ kind: "Pod" }).length).toBe(1);
+  });
+
+  it("includes cluster-scoped objects from cluster/k8s-cluster-resources (istioctl 1.30+)", async () => {
+    const archiveDir = join(tempDir, "bug-report-cluster-scoped");
+    const clusterDir = join(archiveDir, "cluster");
+    await mkdir(clusterDir, { recursive: true });
+
+    const node = "- apiVersion: v1\n  kind: Node\n  metadata:\n    name: node-1\n";
+    const ambientNs =
+      "- apiVersion: v1\n  kind: Namespace\n  metadata:\n    name: ambient-demo\n    labels:\n      istio.io/dataplane-mode: ambient\n";
+    const crd =
+      "- apiVersion: apiextensions.k8s.io/v1\n  kind: CustomResourceDefinition\n  metadata:\n    name: gateways.networking.istio.io\n";
+    await writeFile(join(clusterDir, "k8s-resources"), "apiVersion: v1\nkind: List\nitems:\n- apiVersion: v1\n  kind: Pod\n  metadata:\n    name: p\n    namespace: ambient-demo\n");
+    await writeFile(join(clusterDir, "k8s-cluster-resources"), `apiVersion: v1\nkind: List\nitems:\n${node}${ambientNs}${crd}`);
+    await writeFile(join(clusterDir, "nodes"), `apiVersion: v1\nkind: List\nitems:\n${node}`);
+
+    const store = await BugReportStore.fromDirectory(archiveDir);
+
+    expect(store.getClusterResources({ kind: "Node" }).length).toBe(1);
+    expect(store.getClusterResources({ kind: "CustomResourceDefinition" }).length).toBe(1);
+    expect(store.detectDataPlaneMode().ambientNamespaces).toEqual(["ambient-demo"]);
   });
 });
