@@ -45,11 +45,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",
-    "js-yaml": "^5.5.0",
+    "js-yaml": "^4.3.2",
     "tar": "^7.5.22",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.5",
     "@types/tar": "^7.0.87",
     "typescript": "^7.0.2",
