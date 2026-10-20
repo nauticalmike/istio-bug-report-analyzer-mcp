@@ -254,15 +254,52 @@ export function estimateResourceSavings(store: BugReportStore) {
       );
     }
 
-    lines.push(
-      "",
-      `--- Projected Ambient Resource Usage ---`,
-      `Ztunnel (DaemonSet, ${ztunnelSource}): ${formatCpu(totalZtunnelCpu)} CPU, ${formatMemory(totalZtunnelMemory)} memory (${ztunnels.length || nodes.length} instances)`,
-      `Waypoint Proxies (${waypointSource}): ${formatCpu(totalWaypointCpu)} CPU, ${formatMemory(totalWaypointMemory)} memory`,
-    );
+    lines.push("", `--- Projected Ambient Resource Usage ---`);
 
-    const netCpuSaved = totalSidecarCpu - totalZtunnelCpu - totalWaypointCpu;
-    const netMemorySaved = totalSidecarMemory - totalZtunnelMemory - totalWaypointMemory;
+    // Resources that migrating the sidecars would add on top of what runs today.
+    let addedCpu: number;
+    let addedMemory: number;
+    if (modeInfo.mode === "interop") {
+      // Existing ambient infrastructure is already paid for; only charge what is missing.
+      const missingZtunnels = Math.max(0, nodes.length - ztunnels.length);
+      const waypointNamespaces = new Set(waypoints.map((w) => w.namespace));
+      const sidecarNsWithoutWaypoint = [...new Set(sidecars.map((s) => s.namespace))].filter(
+        (ns) => !waypointNamespaces.has(ns),
+      );
+      const newZtunnelCpu = missingZtunnels * DEFAULT_ZTUNNEL_CPU_REQUEST;
+      const newZtunnelMemory = missingZtunnels * DEFAULT_ZTUNNEL_MEMORY_REQUEST;
+      const newWaypointCpu = sidecarNsWithoutWaypoint.length * DEFAULT_WAYPOINT_CPU_REQUEST;
+      const newWaypointMemory = sidecarNsWithoutWaypoint.length * DEFAULT_WAYPOINT_MEMORY_REQUEST;
+      addedCpu = newZtunnelCpu + newWaypointCpu;
+      addedMemory = newZtunnelMemory + newWaypointMemory;
+
+      lines.push(
+        `Ztunnel (already deployed, ${ztunnels.length} instances): ${formatCpu(totalZtunnelCpu)} CPU, ${formatMemory(totalZtunnelMemory)} memory — no additional cost`,
+      );
+      if (missingZtunnels > 0) {
+        lines.push(
+          `Additional Ztunnel (estimated, ${missingZtunnels} nodes without one): ${formatCpu(newZtunnelCpu)} CPU, ${formatMemory(newZtunnelMemory)} memory`,
+        );
+      }
+      if (waypoints.length > 0) {
+        lines.push(
+          `Waypoint Proxies (already deployed, ${waypoints.length}): ${formatCpu(totalWaypointCpu)} CPU, ${formatMemory(totalWaypointMemory)} memory — no additional cost`,
+        );
+      }
+      lines.push(
+        `Additional Waypoints (estimated, one per sidecar namespace without a waypoint: ${sidecarNsWithoutWaypoint.length}): ${formatCpu(newWaypointCpu)} CPU, ${formatMemory(newWaypointMemory)} memory`,
+      );
+    } else {
+      addedCpu = totalZtunnelCpu + totalWaypointCpu;
+      addedMemory = totalZtunnelMemory + totalWaypointMemory;
+      lines.push(
+        `Ztunnel (DaemonSet, ${ztunnelSource}): ${formatCpu(totalZtunnelCpu)} CPU, ${formatMemory(totalZtunnelMemory)} memory (${ztunnels.length || nodes.length} instances)`,
+        `Waypoint Proxies (${waypointSource}): ${formatCpu(totalWaypointCpu)} CPU, ${formatMemory(totalWaypointMemory)} memory`,
+      );
+    }
+
+    const netCpuSaved = totalSidecarCpu - addedCpu;
+    const netMemorySaved = totalSidecarMemory - addedMemory;
 
     lines.push(
       "",

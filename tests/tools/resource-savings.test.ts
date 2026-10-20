@@ -265,3 +265,75 @@ async function createRichSidecarArchive(basePath: string): Promise<void> {
   await mkdir(join(basePath, "analyze"), { recursive: true });
   await writeFile(join(basePath, "analyze", "allNamespaces"), "");
 }
+
+describe("estimateResourceSavings with an interop (ambient + sidecar) mesh", () => {
+  let store: BugReportStore;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "resource-savings-interop-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createInteropArchive(archiveDir);
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not charge existing ztunnel and waypoints against sidecar savings", () => {
+    const text = (estimateResourceSavings(store).content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("Data Plane Mode: interop");
+    expect(text).toContain("Total CPU Requests: 300m (3 proxies)");
+    expect(text).toContain("already deployed");
+    // Only one new waypoint (100m / 256Mi) for the sidecar namespace is charged.
+    expect(text).toContain("CPU: 200m freed");
+    expect(text).toContain("Memory: 128 Mi freed");
+  });
+});
+
+async function createInteropArchive(basePath: string): Promise<void> {
+  const clusterDir = join(basePath, "cluster");
+  await mkdir(clusterDir, { recursive: true });
+  await writeFile(
+    join(clusterDir, "k8s-resources"),
+    [
+      "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: sidecar-demo\n  labels:\n    istio-injection: enabled",
+      "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ambient-demo\n  labels:\n    istio.io/dataplane-mode: ambient",
+      "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: istio-system",
+    ].join("\n---\n"),
+  );
+  await writeFile(
+    join(clusterDir, "nodes"),
+    "apiVersion: v1\nkind: Node\nmetadata:\n  name: node-1\nstatus:\n  allocatable:\n    cpu: '8'\n    memory: 16Gi\n",
+  );
+  const sidecarPods = ["client-1", "httpbin-1", "httpbin-2"];
+  const podDocs = sidecarPods.map((name) =>
+    [
+      "apiVersion: v1",
+      "kind: Pod",
+      "metadata:",
+      `  name: ${name}`,
+      "  namespace: sidecar-demo",
+      "spec:",
+      "  containers:",
+      "    - name: istio-proxy",
+      "      resources:",
+      "        requests:",
+      "          cpu: 100m",
+      "          memory: 128Mi",
+    ].join("\n"),
+  );
+  await writeFile(join(clusterDir, "pods"), podDocs.join("\n---\n"));
+
+  const proxies: [string, string][] = [
+    ...sidecarPods.map((p): [string, string] => ["sidecar-demo", p]),
+    ["ambient-demo", "waypoint-7b7bd445f4-9slh4"],
+    ["istio-system", "ztunnel-c77st"],
+  ];
+  for (const [ns, pod] of proxies) {
+    const dir = join(basePath, "proxies", ns, pod);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "istio-proxy.log"), "2026-10-20T20:00:00.000Z\tinfo\tstarted\n");
+  }
+}
