@@ -352,7 +352,8 @@ function makeLazyProxyInfo(namespace: string, podName: string, files: Map<string
       return readNow(files.get("clusters"));
     },
     get configDump() {
-      const raw = readNow(files.get("config_dump?include_eds"));
+      // ztunnel (Rust) writes only plain `config_dump`; Envoy proxies write the EDS variant.
+      const raw = readNow(files.get("config_dump?include_eds") ?? files.get("config_dump"));
       return raw ? (tryParseJson(raw) as Record<string, unknown> | null) : null;
     },
     get listeners() {

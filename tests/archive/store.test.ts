@@ -136,6 +136,40 @@ describe("BugReportStore istiod debug endpoint iteration", () => {
   });
 });
 
+describe("BugReportStore proxy config_dump variants", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-config-dump-test-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    // istioctl 1.31: ztunnel pods carry only `config_dump`, Envoy pods `config_dump?include_eds`.
+    const ztunnelDir = join(archiveDir, "proxies", "istio-system", "ztunnel-c77st");
+    await mkdir(ztunnelDir, { recursive: true });
+    await writeFile(join(ztunnelDir, "config_dump"), JSON.stringify({ certificates: [], workloads: [] }));
+    await writeFile(join(ztunnelDir, "istio-proxy.log"), "info ztunnel started\n");
+    const sidecarDir = join(archiveDir, "proxies", "default", "both-variants");
+    await mkdir(sidecarDir, { recursive: true });
+    await writeFile(join(sidecarDir, "config_dump"), JSON.stringify({ variant: "plain" }));
+    await writeFile(join(sidecarDir, "config_dump?include_eds"), JSON.stringify({ variant: "eds" }));
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("falls back to plain config_dump for ztunnel pods", () => {
+    expect(store.getProxyPods("istio-system")[0].proxyType).toBe("ztunnel");
+    expect(store.getProxyConfig("istio-system", "ztunnel-c77st")).toEqual({ certificates: [], workloads: [] });
+  });
+
+  it("prefers config_dump?include_eds when both are present", () => {
+    expect(store.getProxyConfig("default", "both-variants")).toEqual({ variant: "eds" });
+  });
+});
+
 describe("BugReportStore cluster resource dedup", () => {
   let tempDir: string;
 
