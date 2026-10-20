@@ -16,6 +16,7 @@ import { listFiles, getRawFile } from "./resources/archive-resource.js";
 import { runDiagnostics } from "./tools/diagnostics.js";
 import { findErrors } from "./tools/find-errors.js";
 import { estimateResourceSavings } from "./tools/resource-savings.js";
+import { SERVER_VERSION } from "./version.js";
 
 export function createServer(config: ServerConfig) {
   let currentSession: Session | null = null;
@@ -28,7 +29,7 @@ export function createServer(config: ServerConfig) {
 
   const server = new McpServer({
     name: "istio-bug-report-analyzer",
-    version: "0.1.0",
+    version: SERVER_VERSION,
   });
 
   // === Setup Tools ===
