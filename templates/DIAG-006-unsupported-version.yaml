@@ -1,0 +1,31 @@
+id: DIAG-006
+name: Unsupported Istio Version
+category: version
+severity: warning
+description: >
+  The control plane or istioctl client runs an Istio minor version that is
+  outside the upstream support window and no longer receives security fixes.
+rootCause: >
+  The mesh has not been upgraded since its minor version reached end of life.
+impact: >
+  Known CVEs may be unpatched, bug fixes are no longer backported, and newer
+  Kubernetes versions may not be tested against this release.
+signals:
+  # Upstream window as of 2026-10-20: 1.29 EOL 2026-10-15, 1.28 EOL 2026-07-01.
+  # Update this list on each Istio minor release / EOL.
+  - source:
+      type: version_support
+      supported: ["1.30", "1.31"]
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Upgrade the control plane to a supported minor using a canary revision, then migrate workloads"
+    command: "istioctl install --set revision=<new-revision>"
+    effort: high
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/releases/supported-releases/"
+  - "https://istio.io/latest/docs/setup/upgrade/canary/"
+enrichmentHints:
+  docsQuery: "Istio canary upgrade supported releases"

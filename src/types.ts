@@ -142,7 +142,9 @@ export type SignalSource =
   | { type: "resource"; kind: string; field: string }
   | { type: "proxy"; section: string; path: string }
   | { type: "istiod"; endpoint: string; path: string }
-  | { type: "version" };
+  | { type: "version" }
+  | { type: "version_skew" }
+  | { type: "version_support"; supported: string[] };
 
 export type SignalCheck =
   | { op: "exists" }

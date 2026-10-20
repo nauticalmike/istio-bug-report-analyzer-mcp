@@ -3,8 +3,10 @@ name: Proxy-Control Plane Version Skew
 category: version
 severity: warning
 description: >
-  One or more proxy versions do not match the control plane version.
-  Istio supports proxies within one minor version of the control plane.
+  One or more proxies run a different minor version than every control plane
+  revision. Istio supports a control plane at most one minor ahead of the
+  data plane; the data plane must never be ahead. Patch-level differences
+  are not reported.
 rootCause: >
   Proxies were not restarted after a control plane upgrade, or different
   namespaces are injecting different proxy versions.
@@ -13,13 +15,7 @@ impact: >
   incompatible xDS behavior, and are harder to debug.
 signals:
   - source:
-      type: version
-    check:
-      op: exists
-  - source:
-      type: istiod
-      endpoint: syncz
-      path: ""
+      type: version_skew
     check:
       op: exists
 remediation:
