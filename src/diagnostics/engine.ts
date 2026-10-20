@@ -4,6 +4,7 @@ import yaml from "js-yaml";
 import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } from "../types.js";
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
+import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
 
 export class DiagnosticEngine {
   private templates: DiagnosticTemplate[] = [];
@@ -45,16 +46,6 @@ export class DiagnosticEngine {
       }
 
       if (allMatch) {
-        // Post-checks: template-specific validation beyond signal matching
-        if (template.id === "DIAG-001") {
-          const versions = store.getVersions();
-          if (versions) {
-            const cpVersions = new Set(versions.controlPlaneVersions.map((v) => v.version));
-            const dpVersions = new Set(versions.proxyVersions.map((v) => v.version));
-            const allVersions = new Set([...cpVersions, ...dpVersions]);
-            if (allVersions.size <= 1) continue;
-          }
-        }
         if (template.id === "DIAG-003") {
           if (store.getIstiodPods().length >= 2) continue;
         }
@@ -94,6 +85,14 @@ export class DiagnosticEngine {
       }
       case "version": {
         return store.getVersions();
+      }
+      case "version_skew": {
+        const issues = findVersionSkew(store.getVersions());
+        return issues.length > 0 ? issues : null;
+      }
+      case "version_support": {
+        const issues = findUnsupportedVersions(store.getVersions(), source.supported ?? []);
+        return issues.length > 0 ? issues : null;
       }
       case "resource": {
         const resources = store.getClusterResources({ kind: source.kind });
@@ -158,6 +157,10 @@ export class DiagnosticEngine {
       if (signal.source.type === "analyze") {
         const results = store.getAnalyzeResults({ code: signal.source.code });
         affected.push(...results.map((r) => r.resource));
+      } else if (signal.source.type === "version_skew") {
+        affected.push(...findVersionSkew(store.getVersions()).map((i) => i.detail));
+      } else if (signal.source.type === "version_support") {
+        affected.push(...findUnsupportedVersions(store.getVersions(), signal.source.supported ?? []).map((i) => i.detail));
       }
     }
     return [...new Set(affected)];

@@ -42,7 +42,7 @@ export function createServer(config: ServerConfig) {
       exclude: z.string().optional().describe("Comma-separated namespaces to exclude"),
       istioctl_path: z.string().optional().describe("Path to existing istioctl binary"),
       istioctl_source: z.enum(["oss", "solo"]).optional().describe("Download source: 'oss' (istio.io) or 'solo' (Solo.io builds)"),
-      istio_version: z.string().optional().describe("Istio version to download (e.g. '1.24.2'). Auto-detected from cluster if omitted."),
+      istio_version: z.string().optional().describe("Istio version to download (e.g. '1.31.2'). Auto-detected from cluster if omitted."),
       outputDir: z.string().optional().describe("Output directory for the archive"),
     },
     async (params) => collectBugReport(params, getStore, setStore, setSession),
