@@ -26,6 +26,26 @@ describe("parseYamlMultiDoc", () => {
     const docs = parseYamlMultiDoc(input);
     expect(docs).toHaveLength(1);
   });
+
+  it("resolves << merge keys and keeps kubectl scalar semantics", () => {
+    const input = [
+      "apiVersion: v1",
+      "kind: ConfigMap",
+      "metadata:",
+      "  name: merged",
+      "  creationTimestamp: 2026-10-20T20:07:39Z",
+      "base: &base",
+      "  mode: \"0644\"",
+      "  enabled: true",
+      "data:",
+      "  <<: *base",
+      "  extra: \"x\"",
+      "",
+    ].join("\n");
+    const [doc] = parseYamlMultiDoc(input);
+    expect(doc.data).toEqual({ mode: "0644", enabled: true, extra: "x" });
+    expect(doc.metadata.creationTimestamp).toBe("2026-10-20T20:07:39Z");
+  });
 });
 
 describe("parseAnalyzeOutput", () => {
