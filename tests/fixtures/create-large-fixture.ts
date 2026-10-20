@@ -12,6 +12,8 @@ export interface LargeArchiveOptions {
   statsMb: number;
   /** Approximate size in MB of the istiod debug/configz endpoint. */
   istiodDebugMb: number;
+  /** Approximate size in MB of the cluster/k8s-resources Pod list. */
+  clusterDumpMb: number;
 }
 
 export const DEFAULT_LARGE_OPTIONS: LargeArchiveOptions = {
@@ -20,7 +22,34 @@ export const DEFAULT_LARGE_OPTIONS: LargeArchiveOptions = {
   logMb: 4,
   statsMb: 2,
   istiodDebugMb: 24,
+  clusterDumpMb: 40,
 };
+
+function clusterPodItem(i: number): string {
+  return [
+    "- apiVersion: v1",
+    "  kind: Pod",
+    "  metadata:",
+    `    name: dump-pod-${i}`,
+    "    namespace: load-test",
+    "    labels:",
+    "      app: synthetic",
+    "  spec:",
+    "    containers:",
+    "    - name: app",
+    "      image: registry.example/synthetic:1.0",
+    "      resources:",
+    "        requests:",
+    "          cpu: 100m",
+    "          memory: 128Mi",
+    "",
+  ].join("\n");
+}
+
+/** Number of synthetic Pods written to cluster/k8s-resources for `mb`. */
+export function clusterDumpPodCount(mb: number): number {
+  return Math.ceil((mb * 1024 * 1024) / clusterPodItem(0).length);
+}
 
 function repeatToMb(line: string, mb: number): string {
   const target = mb * 1024 * 1024;
@@ -48,9 +77,13 @@ export async function createLargeArchive(
   const clusterDir = join(basePath, "cluster");
   await mkdir(clusterDir, { recursive: true });
   await writeFile(join(clusterDir, "cluster-context"), "context: kind-large-synthetic\n");
+  // Real dumps are one `kind: List` document; parsed objects take several
+  // times the YAML size, so an eager parse of this alone exceeds a small heap.
+  const dumpPods = Array.from({ length: clusterDumpPodCount(options.clusterDumpMb) }, (_, i) => clusterPodItem(i));
   await writeFile(
     join(clusterDir, "k8s-resources"),
-    "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: load-test\n---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: istio-system\n"
+    "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: load-test\n---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: istio-system\n" +
+      `---\napiVersion: v1\nkind: List\nitems:\n${dumpPods.join("")}`
   );
 
   await mkdir(join(basePath, "analyze"), { recursive: true });

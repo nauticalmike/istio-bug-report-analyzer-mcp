@@ -63,6 +63,79 @@ describe("BugReportStore", () => {
   });
 });
 
+describe("BugReportStore lazy cluster resources", () => {
+  let tempDir: string;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-lazy-cluster-test-"));
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("does not read cluster dumps at load, then parses once and caches", async () => {
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const dump = join(archiveDir, "cluster", "k8s-resources");
+    const store = await BugReportStore.fromDirectory(archiveDir);
+
+    // Rewriting the dump after load is only visible if load did not parse it.
+    await writeFile(dump, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: written-after-load\n");
+    expect(store.getClusterResources({ kind: "Namespace" }).map((r) => r.metadata.name)).toEqual([
+      "written-after-load",
+    ]);
+
+    await writeFile(dump, "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: second-rewrite\n");
+    expect(store.getClusterResources({ kind: "Namespace" }).map((r) => r.metadata.name)).toEqual([
+      "written-after-load",
+    ]);
+    expect(store.detectDataPlaneMode().mode).toBe("sidecar");
+  });
+});
+
+describe("BugReportStore istiod debug endpoint iteration", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-debug-iter-test-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const debugDir = join(archiveDir, "istio", "istio-system", "istiod-abc", "debug");
+    await writeFile(join(debugDir, "plain"), "not json\n");
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const freshEndpoints = () => store.getIstiodPods("istio-system")[0].debugEndpoints;
+
+  it("never yields the internal placeholder from values, entries, forEach or spread", () => {
+    const fromValues = Array.from(freshEndpoints().values());
+    const fromEntries = Array.from(freshEndpoints().entries()).map(([, v]) => v);
+    const fromSpread = [...freshEndpoints()].map(([, v]) => v);
+    const fromForEach: unknown[] = [];
+    freshEndpoints().forEach((v) => fromForEach.push(v));
+
+    for (const values of [fromValues, fromEntries, fromSpread, fromForEach]) {
+      expect(values.length).toBeGreaterThanOrEqual(2);
+      expect(values.some((v) => typeof v === "symbol")).toBe(false);
+    }
+  });
+
+  it("iterates the same parsed values that get() returns", () => {
+    const endpoints = freshEndpoints();
+    for (const [key, value] of endpoints) {
+      expect(value).toBe(endpoints.get(key));
+    }
+    expect(endpoints.get("plain")).toBe("not json\n");
+    expect(Array.isArray(endpoints.get("syncz"))).toBe(true);
+  });
+});
+
 describe("BugReportStore cluster resource dedup", () => {
   let tempDir: string;
 
