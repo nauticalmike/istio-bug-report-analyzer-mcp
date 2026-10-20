@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -24,6 +24,10 @@ describe("getLogs", () => {
       join(archiveDir, "operator", "istio-operator-xyz", "operator.log"),
       "2026-10-20T20:00:00.000000Z\tinfo\tReconciling IstioOperator\n",
     );
+    await appendFile(
+      join(archiveDir, "proxies", "default", "test-pod-abc123", "istio-proxy.log"),
+      '2026-10-20T20:22:24.038239Z\tinfo\tFLAG: --proxyComponentLogLevel="misc:error"\n',
+    );
     store = await BugReportStore.fromDirectory(archiveDir);
   });
 
@@ -47,7 +51,7 @@ describe("getLogs", () => {
     const result = await getLogs(store, { component: "proxy", keyword: "error" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("error");
-    expect(text).not.toContain("info");
+    expect(text).not.toContain("Initializing");
   });
 
   it("returns cni logs", async () => {
@@ -74,6 +78,20 @@ describe("getLogs", () => {
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("failed to add iptables rules");
     expect(text).toContain("XDS: Pushing");
+  });
+
+  it("filters by log level rather than substring for severity", async () => {
+    const result = await getLogs(store, { component: "proxy", severity: "error" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("Connection refused");
+    expect(text).not.toContain("proxyComponentLogLevel");
+  });
+
+  it("matches warning lines for severity warn", async () => {
+    const result = await getLogs(store, { component: "proxy", severity: "warn" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("Slow response from upstream");
+    expect(text).not.toContain("Connection refused");
   });
 
   it("truncates output and reports metadata", async () => {

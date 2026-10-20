@@ -1,5 +1,6 @@
 import type { BugReportStore } from "../archive/store.js";
 import { readFileComponentLogs } from "./component-logs.js";
+import { logLevel } from "./log-level.js";
 
 export async function getLogs(
   store: BugReportStore,
@@ -57,7 +58,12 @@ export async function getLogs(
   let filtered = allLines;
   if (params.severity) {
     const sev = params.severity.toLowerCase();
-    filtered = filtered.filter((l) => l.line.toLowerCase().includes(sev));
+    const wanted = sev === "warning" ? "warn" : sev;
+    filtered = filtered.filter((l) => {
+      const level = logLevel(l.line);
+      if (wanted === "error" || wanted === "warn") return level === wanted;
+      return l.line.toLowerCase().includes(sev);
+    });
   }
 
   if (params.keyword) {

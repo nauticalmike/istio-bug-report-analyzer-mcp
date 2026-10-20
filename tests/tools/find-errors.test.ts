@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, appendFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -18,6 +18,12 @@ describe("findErrors", () => {
     await writeFile(
       join(archiveDir, "cni", "istio-cni-node-abcde", "cni.log"),
       "2026-10-20T20:00:01.000000Z\terror\tcni\tfailed to add iptables rules\n",
+    );
+    const proxyNs = join(archiveDir, "proxies", "default");
+    const [proxyPod] = await readdir(proxyNs);
+    await appendFile(
+      join(proxyNs, proxyPod, "istio-proxy.log"),
+      '2026-10-20T20:22:24.038239Z\tinfo\tFLAG: --proxyComponentLogLevel="misc:error"\n',
     );
     store = await BugReportStore.fromDirectory(archiveDir);
   });
@@ -43,6 +49,13 @@ describe("findErrors", () => {
     const result = await findErrors(store, {});
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("failed to add iptables rules");
+  });
+
+  it("ignores info lines that merely mention error", async () => {
+    const result = await findErrors(store, { component: "proxy" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).not.toContain("proxyComponentLogLevel");
+    expect(text).toContain("Slow response from upstream");
   });
 
   it("deduplicates similar error patterns", async () => {
