@@ -11,6 +11,8 @@ const MAX_MESSAGE_CHARS = 300;
 const MAX_LISTED = 10;
 const ISTIO_PREFIX_RE = /^\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?\s+[A-Za-z]+\s+/;
 const COBRA_ERROR_RE = /^Error:\s*(.+)$/;
+// Istio's log rate limiter collapses duplicates into one line with this suffix.
+const REPEATED_SUFFIX_RE = /\s+\(repeated (\d+) times\)$/;
 
 // istioctl writes the same failure as an "Error: ..." line on stderr/stdout and as a
 // leveled log line, so both forms are reduced to the bare message before deduplication.
@@ -31,11 +33,17 @@ export function parseCollectionIssues(content: string): CollectionIssue[] {
       if (!level) continue;
       message = line.replace(ISTIO_PREFIX_RE, "");
     }
+    let occurrences = 1;
+    const repeated = REPEATED_SUFFIX_RE.exec(message);
+    if (repeated) {
+      occurrences = Number(repeated[1]);
+      message = message.slice(0, repeated.index);
+    }
     message = message.slice(0, MAX_MESSAGE_CHARS);
 
     const existing = byMessage.get(message);
-    if (existing) existing.count++;
-    else byMessage.set(message, { level, message, count: 1 });
+    if (existing) existing.count += occurrences;
+    else byMessage.set(message, { level, message, count: occurrences });
   }
   return [...byMessage.values()];
 }

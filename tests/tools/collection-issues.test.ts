@@ -38,6 +38,16 @@ describe("parseCollectionIssues", () => {
     expect(issues.every((i) => i.level === "error")).toBe(true);
   });
 
+  it("folds Istio's rate-limited '(repeated N times)' lines into the same issue", () => {
+    const issues = parseCollectionIssues(
+      [
+        `2026-10-20T20:23:09.090425Z\terror\t${MARSHAL_ERR}`,
+        `2026-10-20T20:23:09.190425Z\terror\t${MARSHAL_ERR} (repeated 4 times)`,
+      ].join("\n"),
+    );
+    expect(issues).toEqual([{ level: "error", message: MARSHAL_ERR, count: 5 }]);
+  });
+
   it("ignores info lines", () => {
     expect(parseCollectionIssues("2026-10-20T20:23:10.000000Z\tinfo\tDone.\n")).toEqual([]);
   });
