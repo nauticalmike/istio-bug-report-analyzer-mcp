@@ -18,6 +18,8 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # npm 10 crashes in arborist (#loadPeerSet) on this tree; package.json devEngines requires >=11.21.
+      - run: npm install -g npm@11.21.1
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
       - run: npm run build
