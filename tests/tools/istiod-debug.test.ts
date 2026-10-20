@@ -21,32 +21,32 @@ describe("getIstiodDebug", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("returns syncz data", () => {
-    const result = getIstiodDebug(store, { endpoint: "syncz" });
+  it("returns syncz data", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "syncz" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("SYNCED");
   });
 
-  it("returns configz data", () => {
-    const result = getIstiodDebug(store, { endpoint: "configz" });
+  it("returns configz data", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "configz" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("virtualservices");
   });
 
-  it("returns mesh config", () => {
-    const result = getIstiodDebug(store, { endpoint: "mesh" });
+  it("returns mesh config", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "mesh" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("discoveryAddress");
   });
 
-  it("returns error for unknown endpoint", () => {
-    const result = getIstiodDebug(store, { endpoint: "nonexistent" });
+  it("returns error for unknown endpoint", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "nonexistent" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("not found");
   });
 
-  it("lists available endpoints when no endpoint specified", () => {
-    const result = getIstiodDebug(store, { endpoint: "" });
+  it("lists available endpoints when no endpoint specified", async () => {
+    const result = await getIstiodDebug(store, { endpoint: "" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("syncz");
     expect(text).toContain("configz");

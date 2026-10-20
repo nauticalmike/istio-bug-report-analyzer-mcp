@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { BugReportStore } from "../archive/store.js";
 import { extractArchive } from "../archive/extractor.js";
 import type { Session } from "../types.js";
+import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
 export async function loadBugReport(
   { path }: { path: string },
@@ -44,11 +45,12 @@ export async function loadBugReport(
         cluster: {
           context: null,
           kubeVersion: null,
-          k8sResources: store.getClusterResources(),
+          // Getters: the cluster dump is parsed on first access, not at load.
+          get k8sResources() { return store.getClusterResources(); },
           customResources: [],
           events: null,
-          nodes: store.getClusterResources({ kind: "Node" }),
-          pods: store.getClusterResources({ kind: "Pod" }),
+          get nodes() { return store.getClusterResources({ kind: "Node" }); },
+          get pods() { return store.getClusterResources({ kind: "Pod" }); },
           secrets: [],
         },
         proxies: new Map(),
@@ -75,9 +77,11 @@ export async function loadBugReport(
       `Proxies: ${proxyPods.length} pods`,
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
-    ].join("\n");
+    ];
+    const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+    if (issueLines.length > 0) summary.push("", ...issueLines);
 
-    return { content: [{ type: "text" as const, text: summary }] };
+    return { content: [{ type: "text" as const, text: summary.join("\n") }] };
   } catch (error) {
     return {
       content: [{ type: "text" as const, text: `Error loading bug report: ${error instanceof Error ? error.message : String(error)}` }],

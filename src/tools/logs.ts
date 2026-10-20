@@ -1,6 +1,8 @@
 import type { BugReportStore } from "../archive/store.js";
+import { readFileComponentLogs } from "./component-logs.js";
+import { logLevel } from "./log-level.js";
 
-export function getLogs(
+export async function getLogs(
   store: BugReportStore,
   params: {
     component: string;
@@ -44,10 +46,24 @@ export function getLogs(
     }
   }
 
+  for (const component of ["cni", "operator"] as const) {
+    if (params.component !== component && params.component !== "all") continue;
+    for (const { source, content } of await readFileComponentLogs(store, component, params.pod)) {
+      for (const line of content.split("\n")) {
+        if (line.trim()) allLines.push({ source, line });
+      }
+    }
+  }
+
   let filtered = allLines;
   if (params.severity) {
     const sev = params.severity.toLowerCase();
-    filtered = filtered.filter((l) => l.line.toLowerCase().includes(sev));
+    const wanted = sev === "warning" ? "warn" : sev;
+    filtered = filtered.filter((l) => {
+      const level = logLevel(l.line);
+      if (wanted === "error" || wanted === "warn") return level === wanted;
+      return l.line.toLowerCase().includes(sev);
+    });
   }
 
   if (params.keyword) {

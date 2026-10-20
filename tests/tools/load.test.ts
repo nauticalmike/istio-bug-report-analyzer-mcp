@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { loadBugReport } from "../../src/tools/load.js";
 import type { Session } from "../../src/types.js";
-import type { BugReportStore } from "../../src/archive/store.js";
+import { BugReportStore } from "../../src/archive/store.js";
 
 describe("loadBugReport", () => {
   let tempDir: string;
@@ -39,6 +39,19 @@ describe("loadBugReport", () => {
     expect(session).not.toBeNull();
     expect(session!.id).toMatch(/^session-/);
     expect(store).not.toBeNull();
+  });
+
+  it("does not force a cluster resource parse at load", async () => {
+    const spy = vi.spyOn(BugReportStore.prototype, "getClusterResources");
+    let session: Session | null = null;
+    try {
+      await loadBugReport({ path: archiveDir }, () => null, () => {}, (s) => { session = s; });
+      expect(spy).not.toHaveBeenCalled();
+      expect(session!.archive.cluster.k8sResources.length).toBeGreaterThan(0);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("returns error for non-existent path", async () => {

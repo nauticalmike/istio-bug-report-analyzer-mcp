@@ -21,8 +21,8 @@ describe("getOverview", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("returns structured overview", () => {
-    const result = getOverview(store);
+  it("returns structured overview", async () => {
+    const result = await getOverview(store);
     expect(result.content[0].type).toBe("text");
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("1.31.2");

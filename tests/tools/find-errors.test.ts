@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, appendFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -14,6 +14,17 @@ describe("findErrors", () => {
     tempDir = await mkdtemp(join(tmpdir(), "errors-test-"));
     const archiveDir = join(tempDir, "bug-report");
     await createMinimalArchive(archiveDir);
+    await mkdir(join(archiveDir, "cni", "istio-cni-node-abcde"), { recursive: true });
+    await writeFile(
+      join(archiveDir, "cni", "istio-cni-node-abcde", "cni.log"),
+      "2026-10-20T20:00:01.000000Z\terror\tcni\tfailed to add iptables rules\n",
+    );
+    const proxyNs = join(archiveDir, "proxies", "default");
+    const [proxyPod] = await readdir(proxyNs);
+    await appendFile(
+      join(proxyNs, proxyPod, "istio-proxy.log"),
+      '2026-10-20T20:22:24.038239Z\tinfo\tFLAG: --proxyComponentLogLevel="misc:error"\n',
+    );
     store = await BugReportStore.fromDirectory(archiveDir);
   });
 
@@ -21,14 +32,34 @@ describe("findErrors", () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it("finds error lines in proxy logs", () => {
-    const result = findErrors(store, { component: "proxy" });
+  it("finds error lines in proxy logs", async () => {
+    const result = await findErrors(store, { component: "proxy" });
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toContain("Connection refused");
   });
 
-  it("deduplicates similar error patterns", () => {
-    const result = findErrors(store, {});
+  it("finds error lines in cni logs", async () => {
+    const result = await findErrors(store, { component: "cni" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("cni/istio-cni-node-abcde");
+    expect(text).toContain("failed to add iptables rules");
+  });
+
+  it("includes cni errors when scanning all components", async () => {
+    const result = await findErrors(store, {});
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("failed to add iptables rules");
+  });
+
+  it("ignores info lines that merely mention error", async () => {
+    const result = await findErrors(store, { component: "proxy" });
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(text).not.toContain("proxyComponentLogLevel");
+    expect(text).toContain("Slow response from upstream");
+  });
+
+  it("deduplicates similar error patterns", async () => {
+    const result = await findErrors(store, {});
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toMatch(/\d+ unique/);
   });

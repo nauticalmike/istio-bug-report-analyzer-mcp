@@ -1,4 +1,6 @@
 import type { BugReportStore } from "../archive/store.js";
+import { readFileComponentLogs } from "./component-logs.js";
+import { logLevel } from "./log-level.js";
 
 interface ErrorGroup {
   pattern: string;
@@ -7,19 +9,18 @@ interface ErrorGroup {
   examples: string[];
 }
 
-export function findErrors(
+export async function findErrors(
   store: BugReportStore,
   params: { severity?: string; component?: string; keyword?: string },
 ) {
   const errorLines: { component: string; line: string }[] = [];
-  const severityRe = /\b(error|warn|fatal|panic|crash)\b/i;
 
   if (!params.component || params.component === "proxy" || params.component === "all") {
     for (const pod of store.getProxyPods()) {
       const logs = pod.logs;
       if (!logs) continue;
       for (const line of logs.split("\n")) {
-        if (line.trim() && severityRe.test(line)) {
+        if (line.trim() && logLevel(line) !== null) {
           errorLines.push({ component: `proxy/${pod.namespace}/${pod.podName}`, line: line.trim() });
         }
       }
@@ -31,8 +32,19 @@ export function findErrors(
       const discoveryLog = pod.discoveryLog;
       if (!discoveryLog) continue;
       for (const line of discoveryLog.split("\n")) {
-        if (line.trim() && severityRe.test(line)) {
+        if (line.trim() && logLevel(line) !== null) {
           errorLines.push({ component: `istiod/${pod.namespace}/${pod.podName}`, line: line.trim() });
+        }
+      }
+    }
+  }
+
+  for (const component of ["cni", "operator"] as const) {
+    if (params.component && params.component !== component && params.component !== "all") continue;
+    for (const { source, content } of await readFileComponentLogs(store, component)) {
+      for (const line of content.split("\n")) {
+        if (line.trim() && logLevel(line) !== null) {
+          errorLines.push({ component: source, line: line.trim() });
         }
       }
     }
