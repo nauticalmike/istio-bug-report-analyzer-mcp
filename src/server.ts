@@ -8,6 +8,7 @@ import { getOverview } from "./tools/overview.js";
 import { getVersions } from "./tools/versions.js";
 import { getAnalyzeResults } from "./tools/analyze-results.js";
 import { getClusterResources } from "./tools/cluster-resources.js";
+import { withClusterWarnings } from "./tools/cluster-warnings.js";
 import { getProxyConfig } from "./tools/proxy-config.js";
 import { getLogs } from "./tools/logs.js";
 import { getIstiodDebug } from "./tools/istiod-debug.js";
@@ -58,15 +59,17 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "get_analyze_results",
-    "Get istioctl analyze results (IST codes). Filter by severity or code.",
+    "Get istioctl analyze results (IST codes) with a count per code. Filter by severity or code; results are paged (default 200).",
     {
       severity: z.enum(["Error", "Warning", "Info"]).optional().describe("Filter by severity"),
       code: z.string().optional().describe("Filter by IST code (e.g. IST0101)"),
+      limit: z.number().optional().describe("Max findings to return (default 200)"),
+      offset: z.number().optional().describe("Skip this many findings (for paging)"),
     },
-    async ({ severity, code }) => {
+    async ({ severity, code, limit, offset }) => {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
-      return getAnalyzeResults(store, { severity, code });
+      return getAnalyzeResults(store, { severity, code, limit, offset });
     },
   );
 
@@ -84,7 +87,7 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
       await store.ensureClusterResources();
-      return getClusterResources(store, params);
+      return withClusterWarnings(store, getClusterResources(store, params));
     },
   );
 
@@ -169,7 +172,7 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded." }], isError: true };
       await store.ensureClusterResources();
-      return runDiagnostics(store, params);
+      return withClusterWarnings(store, await runDiagnostics(store, params));
     },
   );
 
@@ -195,7 +198,7 @@ export function createServer(config: ServerConfig) {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
       await store.ensureClusterResources();
-      return estimateResourceSavings(store);
+      return withClusterWarnings(store, await estimateResourceSavings(store));
     },
   );
 

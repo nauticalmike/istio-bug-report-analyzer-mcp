@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { closeSync, openSync, readFileSync, readSync } from "node:fs";
+import { getHeapStatistics } from "node:v8";
 import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
-import { extractNamespaceResourcesFromFile } from "./namespace-scan.js";
-import { parseYamlMultiDoc, parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
+import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
+import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import type {
   VersionInfo,
   AnalyzeResult,
@@ -95,6 +96,12 @@ const CLUSTER_DUMP_FILES = [
   "cluster/pods",
 ];
 
+// Retained heap per dump byte when parsed item by item: measured 1.5x on a 550 MB
+// dump and 2.3x on a 1.2 GB one, plus headroom for the tools that then filter the
+// result. Running out of heap kills the server, so a dump that would not fit is
+// skipped with a warning instead.
+const HEAP_PER_DUMP_BYTE = 3;
+
 function resourceKey(r: ParsedResource): string {
   return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
 }
@@ -108,7 +115,7 @@ export class BugReportStore {
   private proxyFiles = new Map<string, Map<string, string>>(); // "ns/pod" -> subpath -> absPath
   private istiodPods = new Map<string, IstiodInfo[]>();
   private clusterResources: ParsedResource[] | null = null;
-  private clusterLoad: Promise<ParsedResource[]> | null = null;
+  private clusterLoadIssues: string[] = [];
   private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
 
@@ -187,34 +194,57 @@ export class BugReportStore {
   }
 
   /**
-   * Parses the cluster dumps on first use and caches the result. The parsed
-   * objects are several times the YAML size (a 78MB `k8s-resources` retains
-   * ~470MB of heap), so this cost is only paid by tools that need them.
+   * Parses the cluster dumps on first use and caches the result, item by item so
+   * dumps over V8's ~512 MiB string limit load too. A dump that cannot be parsed,
+   * or would not fit in the heap, is skipped and reported by getClusterLoadIssues().
    */
   private loadClusterResources(): ParsedResource[] {
     if (this.clusterResources) return this.clusterResources;
+    const sizes = new Map(this.index.files.map((f) => [f.relativePath, f.size]));
+    const dumps = CLUSTER_DUMP_FILES.filter((f) => this.pathIndex.has(f));
+    const issues: string[] = [];
+
+    const heap = getHeapStatistics();
+    const budget = heap.heap_size_limit * 0.9 - heap.used_heap_size;
+    const need = (files: string[]) => files.reduce((sum, f) => sum + (sizes.get(f) ?? 0) * HEAP_PER_DUMP_BYTE, 0);
+    const skipped = new Set<string>();
+    const bySize = [...dumps].sort((a, b) => (sizes.get(b) ?? 0) - (sizes.get(a) ?? 0));
+    // Heap size (MiB, rounded up to a GiB) that would fit every dump.
+    const mb = Math.ceil((need(dumps) + heap.used_heap_size) / 0.9 / 2 ** 30) * 1024;
+    while (need(dumps.filter((f) => !skipped.has(f))) > budget && skipped.size < bySize.length) {
+      const largest = bySize[skipped.size];
+      skipped.add(largest);
+      issues.push(
+        `${largest} (${formatMB(sizes.get(largest) ?? 0)}) was not parsed: the cluster dumps need ~${formatMB(need(dumps))} of heap and ` +
+          `~${formatMB(Math.max(0, budget))} is available. Restart the server with NODE_OPTIONS=--max-old-space-size=${mb} to load all cluster dumps.`,
+      );
+    }
+
     const acc = newClusterAccumulator();
-    for (const file of CLUSTER_DUMP_FILES) addClusterDump(acc, readNow(this.pathIndex.get(file)));
+    for (const file of dumps) {
+      if (skipped.has(file)) continue;
+      const info: ScanInfo = {};
+      try {
+        addClusterDump(acc, parseClusterDumpFile(this.pathIndex.get(file), info));
+      } catch (e) {
+        issues.push(`${file} (${formatMB(sizes.get(file) ?? 0)}) could not be parsed: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
+      if (info.skippedItems) issues.push(`${file}: ${info.skippedItems} item(s) did not parse and were skipped`);
+    }
+    this.clusterLoadIssues = issues;
     this.clusterResources = acc.resources;
     return acc.resources;
   }
 
-  /**
-   * Async variant of the lazy cluster parse; the server awaits it before tools that
-   * need cluster data. Async reads peak ~25% lower than readFileSync on large dumps.
-   */
+  /** Awaited by the server before tools that need cluster data. */
   ensureClusterResources(): Promise<ParsedResource[]> {
-    if (this.clusterResources) return Promise.resolve(this.clusterResources);
-    this.clusterLoad ??= (async () => {
-      const acc = newClusterAccumulator();
-      for (const file of CLUSTER_DUMP_FILES) {
-        const path = this.pathIndex.get(file);
-        addClusterDump(acc, path ? await readFile(path, "utf-8") : null);
-      }
-      this.clusterResources ??= acc.resources;
-      return this.clusterResources;
-    })();
-    return this.clusterLoad;
+    return Promise.resolve(this.loadClusterResources());
+  }
+
+  /** Dumps skipped or only partly parsed by the cluster parse (empty before it runs). */
+  getClusterLoadIssues(): string[] {
+    return this.clusterLoadIssues;
   }
 
   /**
@@ -340,6 +370,11 @@ export class BugReportStore {
     return Array.from(this.proxies.keys());
   }
 
+  /** Size in bytes from the archive index, or null when the file is not in the archive. */
+  getFileSize(relativePath: string): number | null {
+    return this.index.files.find((f) => f.relativePath === relativePath)?.size ?? null;
+  }
+
   getAllFiles(): string[] {
     return this.index.files.map((f) => f.relativePath);
   }
@@ -404,9 +439,12 @@ function newClusterAccumulator(): ClusterAccumulator {
   return { seen: new Set(), resources: [] };
 }
 
-function addClusterDump(acc: ClusterAccumulator, content: string | null): void {
-  if (!content) return;
-  for (const resource of parseYamlMultiDoc(content)) {
+function formatMB(bytes: number): string {
+  return `${Math.round(bytes / 1e6).toLocaleString("en-US")} MB`;
+}
+
+function addClusterDump(acc: ClusterAccumulator, resources: ParsedResource[]): void {
+  for (const resource of resources) {
     const key = resourceKey(resource);
     if (acc.seen.has(key)) continue;
     acc.seen.add(key);

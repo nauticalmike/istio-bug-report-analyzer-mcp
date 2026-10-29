@@ -41,7 +41,7 @@ Then restart Claude Code to pick up the new skill.
 | `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` |
 | `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop) and collection issues |
 | `get_versions` | Version matrix with skew detection |
-| `get_analyze_results` | `istioctl analyze` results (IST codes) |
+| `get_analyze_results` | `istioctl analyze` results (IST codes), with a count per code; paged with `limit`/`offset` |
 | `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects |
 | `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel |
 | `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering |
@@ -75,6 +75,14 @@ The `estimate_resource_savings` tool analyzes the mesh's infrastructure footprin
 - **Interop mode**: Per-namespace breakdown showing which sidecar namespaces would benefit most from completing the migration
 
 The tool extracts actual resource requests from Pod specs when available, falling back to Istio defaults. It also flags optimization opportunities like over-provisioned sidecars and high-density namespaces.
+
+## Large Bug Reports
+
+Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one List item at a time, so dumps larger than Node's ~512 MiB string limit load too. A parsed dump takes roughly 1.5–2.5× its file size in heap; on Node's default heap (~4 GB) up to about 1.2 GB of dumps in total load. If a dump would not fit, it is skipped and every tool that uses cluster data says so, with the `--max-old-space-size` value to restart with, for example:
+
+```json
+"env": { "NODE_OPTIONS": "--max-old-space-size=8192" }
+```
 
 ## Supported Istio Versions
 

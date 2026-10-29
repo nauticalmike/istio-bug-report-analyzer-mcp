@@ -1,3 +1,4 @@
+import { clusterWarningLines } from "./cluster-warnings.js";
 import type { BugReportStore } from "../archive/store.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
@@ -41,6 +42,8 @@ export async function getOverview(store: BugReportStore) {
     "",
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
   ];
+  const warnings = clusterWarningLines(store);
+  if (warnings.length > 0) lines.push("", ...warnings);
   const issueLines = formatCollectionIssues(await getCollectionIssues(store));
   if (issueLines.length > 0) lines.push("", ...issueLines);
 

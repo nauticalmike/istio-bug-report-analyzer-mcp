@@ -8,6 +8,11 @@ const { merge } = (yaml as unknown as { types: { merge: yaml.Type } }).types;
 // Stay on js-yaml 4: v5 peaks ~25% higher RSS on large cluster dumps for the same speed.
 const K8S_SCHEMA = CORE_SCHEMA.extend({ implicit: [merge] });
 
+/** One YAML document with the cluster-dump schema; throws when it does not parse. */
+export function parseYamlItem(content: string): unknown {
+  return load(content, { schema: K8S_SCHEMA });
+}
+
 export function parseYamlMultiDoc(content: string): ParsedResource[] {
   const docs: ParsedResource[] = [];
   const rawDocs = content.split(/^---$/m);

@@ -36,6 +36,21 @@ describe("getAnalyzeResults", () => {
     expect(text).not.toContain("IST0118");
   });
 
+  it("summarizes by code and pages the findings", () => {
+    const all = getAnalyzeResults(store, {});
+    const total = store.getAnalyzeResults().length;
+    const text = (all.content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("By code:");
+    expect(text).toMatch(/IST0101 \(Error\): \d+/);
+    expect(text).not.toContain("Showing");
+
+    const page = (getAnalyzeResults(store, { limit: 1, offset: 1 }).content[0] as { type: "text"; text: string }).text;
+    const findingLines = page.split("\n").filter((l) => l.startsWith("["));
+    expect(findingLines).toHaveLength(1);
+    expect(findingLines[0]).toContain(store.getAnalyzeResults()[1].resource);
+    expect(page).toContain(`Showing 2-2 of ${total}.`);
+  });
+
   it("filters by code", () => {
     const result = getAnalyzeResults(store, { code: "IST0107" });
     const text = (result.content[0] as { type: "text"; text: string }).text;

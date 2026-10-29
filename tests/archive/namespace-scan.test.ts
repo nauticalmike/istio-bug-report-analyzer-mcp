@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractNamespaceResources } from "../../src/archive/namespace-scan.js";
+import { ClusterDumpError, extractNamespaceResources, parseClusterDumpFile, type ScanInfo } from "../../src/archive/namespace-scan.js";
 import { parseYamlMultiDoc } from "../../src/archive/parser.js";
 import { BugReportStore } from "../../src/archive/store.js";
 
@@ -199,6 +199,80 @@ describe("extractNamespaceResources", () => {
 
   it("returns nothing for empty content", () => {
     expect(extractNamespaceResources("")).toEqual([]);
+  });
+
+  describe("parseClusterDumpFile (every item)", () => {
+    let dir: string;
+    let n = 0;
+    beforeAll(async () => {
+      dir = await mkdtemp(join(tmpdir(), "dump-scan-"));
+    });
+    afterAll(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+    const file = async (content: string) => {
+      const p = join(dir, `dump-${n++}`);
+      await writeFile(p, content);
+      return p;
+    };
+    // maxFullParseBytes = 0 forces the item-by-item path used for dumps over V8's string limit.
+    const lenient = (p: string, info?: ScanInfo) => parseClusterDumpFile(p, info, 0);
+
+    for (const [name, content] of Object.entries(cases)) {
+      it(`matches the full parse, with and without a fallback available: ${name}`, async () => {
+        const p = await file(content);
+        const strict: ScanInfo = {};
+        const big: ScanInfo = {};
+        expect(parseClusterDumpFile(p, strict)).toEqual(parseYamlMultiDoc(content));
+        expect(lenient(p, big)).toEqual(parseYamlMultiDoc(content));
+        expect(strict.fallback).toBeUndefined();
+        expect(big.skippedItems).toBeUndefined();
+      });
+    }
+
+    for (const [name, { content }] of Object.entries(adversarial)) {
+      it(`matches the full parse (adversarial): ${name}`, async () => {
+        expect(parseClusterDumpFile(await file(content))).toEqual(parseYamlMultiDoc(content));
+      });
+    }
+
+    it("parses every item, not only Namespaces (comparisons above are not vacuous)", async () => {
+      const kinds = parseClusterDumpFile(await file(cases["kubectl List (items at column 0)"])).map((r) => r.kind);
+      expect(kinds).toEqual(["Namespace", "Pod", "Namespace", "Namespace"]);
+    });
+
+    it("without a fallback, skips and counts items that do not parse on their own", async () => {
+      const p = await file(
+        vlist(vns("a") + `- apiVersion: v1\n  kind: Pod\n  metadata:\n    name: p\n    name: p\n` + vns("b") + `- kind: Pod\n  metadata: *missing\n`),
+      );
+      const info: ScanInfo = {};
+      expect(lenient(p, info).map((r) => r.metadata.name)).toEqual(["a", "b"]);
+      expect(info.skippedItems).toBe(2);
+      // With a fallback available the result stays identical to the full parse, which drops the document.
+      expect(parseClusterDumpFile(p)).toEqual([]);
+    });
+
+    it("without a fallback, reports YAML the scanner cannot split instead of misparsing it", async () => {
+      const p = await file(adversarial["flow-style item"].content);
+      expect(() => lenient(p)).toThrow(ClusterDumpError);
+    });
+
+    it("matches the full parse across 1 MB chunk boundaries", async () => {
+      const items: string[] = [];
+      for (let i = 0; i < 3000; i++) items.push(i % 50 === 0 ? ns(`ns-${i}`) : decoyPod());
+      items.splice(1000, 0, `- apiVersion: v1\n  kind: ConfigMap\n  metadata:\n    name: huge\n  data:\n    blob: "${"x".repeat(1_500_000)}"`);
+      const content = list(items);
+      const p = await file(content);
+      const expected = parseYamlMultiDoc(content);
+      expect(expected.length).toBe(3001);
+      expect(lenient(p)).toEqual(expected);
+      expect(parseClusterDumpFile(p)).toEqual(expected);
+    });
+
+    it("returns nothing for a missing file", () => {
+      expect(parseClusterDumpFile(join(dir, "absent"))).toEqual([]);
+      expect(parseClusterDumpFile(undefined)).toEqual([]);
+    });
   });
 });
 

@@ -1,5 +1,6 @@
+import { constants as bufferConstants } from "node:buffer";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
-import { parseYamlMultiDoc } from "./parser.js";
+import { parseYamlItem, parseYamlMultiDoc } from "./parser.js";
 import type { ParsedResource } from "../types.js";
 
 const NL = 0x0a;
@@ -24,7 +25,29 @@ const NODE_PROPERTIES_RE = /^[&!]\S*(?:[ \t]+[&!]\S*)*[ \t]*(?:[ \t]#.*)?$/;
 export interface ScanInfo {
   /** Set when the scanner handed the file to the full parse, with the reason. */
   fallback?: string;
+  /** List items skipped because they did not parse (only for dumps too large to full-parse). */
+  skippedItems?: number;
 }
+
+/**
+ * Largest file that can be read as one string; a UTF-8 file never decodes to more
+ * UTF-16 units than it has bytes. Bigger dumps exist in the field (550 MB+ for
+ * clusters with ~600 namespaces), and those can only be parsed item by item.
+ */
+export const MAX_STRING_BYTES = bufferConstants.MAX_STRING_LENGTH;
+
+/** A dump the item scanner cannot handle and that is too large for the full parse. */
+export class ClusterDumpError extends Error {}
+
+interface ScanMode {
+  /** Collect every item and document, not only Namespaces. */
+  all: boolean;
+  /** No full-parse fallback exists: skip items that do not parse instead of falling back. */
+  lenient: boolean;
+  info?: ScanInfo;
+}
+
+const NAMESPACES: ScanMode = { all: false, lenient: false };
 
 interface ByteSource {
   readonly size: number;
@@ -47,7 +70,7 @@ export function extractNamespaceResources(content: string | Buffer | null, info?
   const buf = typeof content === "string" ? Buffer.from(content, "utf8") : content;
   const source: ByteSource = { size: buf.length, readInto: (t, o, l, p) => buf.copy(t, o, p, Math.min(p + l, buf.length)) };
   return withFallback(
-    () => scan(source),
+    () => scan(source, NAMESPACES),
     () => (typeof content === "string" ? content : buf.toString("utf8")),
     info,
   );
@@ -67,20 +90,77 @@ export function extractNamespaceResourcesFromFile(path: string | undefined, info
     return [];
   }
   try {
-    const source: ByteSource = { size: fstatSync(fd).size, readInto: (t, o, l, p) => readSync(fd, t, o, l, p) };
-    return withFallback(() => scan(source), () => readFileSync(path, "utf8"), info);
+    const size = fstatSync(fd).size;
+    const source: ByteSource = { size, readInto: (t, o, l, p) => readSync(fd, t, o, l, p) };
+    if (size > MAX_STRING_BYTES) {
+      // No whole-file fallback exists; parse every item instead and keep the Namespaces.
+      return withFallback(
+        () => scan(source, NAMESPACES),
+        () => "",
+        info,
+        () => {
+          try {
+            return scan(source, { all: true, lenient: true }).filter((r) => r.kind === "Namespace");
+          } catch {
+            return [];
+          }
+        },
+      );
+    }
+    return withFallback(() => scan(source, NAMESPACES), () => readFileSync(path, "utf8"), info);
   } finally {
     closeSync(fd);
   }
 }
 
-function withFallback(run: () => ParsedResource[], text: () => string, info?: ScanInfo): ParsedResource[] {
+/**
+ * Every resource in a cluster dump, equal to `parseYamlMultiDoc(readFileSync(path))`,
+ * parsed one List item at a time from 1 MB chunks: no whole-file string, and the
+ * parsed objects retain ~1.5-2.5x the file size instead of ~6x. Files over
+ * MAX_STRING_BYTES have no full-parse fallback, so items that do not parse on their
+ * own are skipped and counted in `info.skippedItems`, and unsupported input throws
+ * ClusterDumpError. Returns [] when the file is missing.
+ */
+export function parseClusterDumpFile(path: string | undefined, info?: ScanInfo, maxFullParseBytes = MAX_STRING_BYTES): ParsedResource[] {
+  if (!path) return [];
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return [];
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const source: ByteSource = { size, readInto: (t, o, l, p) => readSync(fd, t, o, l, p) };
+    if (size > maxFullParseBytes) {
+      try {
+        return scan(source, { all: true, lenient: true, info });
+      } catch (e) {
+        if (e instanceof Fallback) throw new ClusterDumpError(`unsupported YAML for an over-${mib(maxFullParseBytes)} dump (${e.message})`);
+        if (e instanceof RangeError) throw new ClusterDumpError(`a single document or item is over the ${mib(MAX_STRING_BYTES)} string limit`);
+        throw e;
+      }
+    }
+    return withFallback(() => scan(source, { all: true, lenient: false }), () => readFileSync(path, "utf8"), info, parseYamlMultiDoc);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const mib = (bytes: number) => `${Math.floor(bytes / 2 ** 20)} MiB`;
+
+function withFallback(
+  run: () => ParsedResource[],
+  text: () => string,
+  info?: ScanInfo,
+  parse: (yamlText: string) => ParsedResource[] = namespacesIn,
+): ParsedResource[] {
   try {
     return run();
   } catch (e) {
     if (!(e instanceof Fallback)) throw e;
     if (info) info.fallback = e.message;
-    return namespacesIn(text());
+    return parse(text());
   }
 }
 
@@ -93,11 +173,11 @@ interface DocState {
   indent: string | null; // indent of the `- ` entries, once the first one is seen
   itemsFailed: boolean; // first line after `items:` was not a `- ` entry
   item: { start: number; isNamespace: boolean } | null;
-  namespaceItems: [number, number][];
-  keys: KeyTracker;
+  items: [number, number][]; // Namespace items, or every item in `all` mode
+  keys: KeyTracker | null;
 }
 
-const newDoc = (start: number): DocState => ({
+const newDoc = (start: number, mode: ScanMode): DocState => ({
   start,
   sawContent: false,
   listKind: false,
@@ -106,8 +186,9 @@ const newDoc = (start: number): DocState => ({
   indent: null,
   itemsFailed: false,
   item: null,
-  namespaceItems: [],
-  keys: new KeyTracker(),
+  items: [],
+  // Lenient mode parses each item on its own, so a duplicate key only loses that item.
+  keys: mode.lenient ? null : new KeyTracker(),
 });
 
 /**
@@ -119,21 +200,43 @@ const newDoc = (start: number): DocState => ({
  * back and parsed. Every line also feeds a duplicate-key check, because one
  * duplicate key anywhere makes the full parse drop the whole document.
  */
-function scan(src: ByteSource): ParsedResource[] {
-  const namespaces: ParsedResource[] = [];
-  let doc = newDoc(0);
+function scan(src: ByteSource, mode: ScanMode): ParsedResource[] {
+  const out: ParsedResource[] = [];
+  let doc = newDoc(0, mode);
+
+  const itemText = (s: number, e: number, pad: string, dedent: RegExp) =>
+    readRange(src, s + pad.length, e).toString("utf8").replace(dedent, "\n");
 
   const finishDoc = (end: number) => {
-    closeItem(doc, end);
+    closeItem(doc, end, mode.all);
     if (doc.listKind && doc.indent !== null) {
       const pad = `${doc.indent}  `;
       const dedent = new RegExp(`\\n${pad}`, "g");
-      for (const [s, e] of doc.namespaceItems) {
-        const text = readRange(src, s + pad.length, e).toString("utf8");
-        namespaces.push(...checked(namespacesIn(text.replace(dedent, "\n")), 1));
+      for (const [s, e] of doc.items) {
+        const text = itemText(s, e, pad, dedent);
+        if (!mode.all) {
+          out.push(...checked(namespacesIn(text), 1));
+          continue;
+        }
+        let item: unknown;
+        try {
+          item = parseYamlItem(text);
+        } catch {
+          // The full parse drops the whole document when one item is invalid.
+          if (!mode.lenient) throw new Fallback("List item did not parse on its own");
+          if (mode.info) mode.info.skippedItems = (mode.info.skippedItems ?? 0) + 1;
+          continue;
+        }
+        if (item && typeof item === "object") out.push(item as ParsedResource);
+      }
+    } else if (mode.all) {
+      // A List whose `items:` is empty or has no value yields nothing (the full parse would
+      // return the List object itself for `items:` with no value); other documents are parsed whole.
+      if (doc.sawContent && !(doc.listKind && doc.itemsLine && !doc.itemsFailed)) {
+        out.push(...parseYamlMultiDoc(readRange(src, doc.start, end).toString("utf8")));
       }
     } else if (doc.namespaceKind) {
-      namespaces.push(...checked(namespacesIn(readRange(src, doc.start, end).toString("utf8")), 0));
+      out.push(...checked(namespacesIn(readRange(src, doc.start, end).toString("utf8")), 0));
     }
   };
 
@@ -142,7 +245,7 @@ function scan(src: ByteSource): ParsedResource[] {
     if (buf[s] === DASH && buf[s + 1] === DASH && buf[s + 2] === DASH) {
       if (e - s === 3) {
         finishDoc(abs);
-        doc = newDoc(abs + 3);
+        doc = newDoc(abs + 3, mode);
         return;
       }
       if (buf[s + 3] === SP || buf[s + 3] === TAB) throw new Fallback("document marker followed by content");
@@ -162,7 +265,7 @@ function scan(src: ByteSource): ParsedResource[] {
         const first = buf[s] === 0xef && buf[s + 1] === 0xbb && buf[s + 2] === 0xbf ? buf[s + 3] : buf[s + n];
         if (first === 0x7b || first === 0x5b || first === 0x25) throw new Fallback("flow-style (JSON) document or directive");
       }
-      doc.keys.line(buf, s, n, e);
+      doc.keys?.line(buf, s, n, e);
     }
 
     if (n === 0 && !blank && !comment) {
@@ -199,7 +302,7 @@ function scan(src: ByteSource): ParsedResource[] {
     if (blank || comment) return;
 
     // Neither indented past the dash nor blank: the open item (if any) ends here.
-    closeItem(doc, abs - 1);
+    closeItem(doc, abs - 1, mode.all);
     if (n === indent.length && buf[s + n] === DASH) {
       const next = buf[s + n + 1];
       if (s + n + 1 >= e) throw new Fallback("empty sequence entry");
@@ -212,7 +315,7 @@ function scan(src: ByteSource): ParsedResource[] {
     }
   });
   finishDoc(src.size);
-  return namespaces;
+  return out;
 }
 
 /** A Namespace item or document must yield named Namespaces, else the scan is not trusted. */
@@ -222,8 +325,8 @@ function checked(found: ParsedResource[], exactly: number): ParsedResource[] {
   return found;
 }
 
-function closeItem(doc: DocState, end: number): void {
-  if (doc.item?.isNamespace) doc.namespaceItems.push([doc.item.start, end]);
+function closeItem(doc: DocState, end: number, all: boolean): void {
+  if (doc.item && (all || doc.item.isNamespace)) doc.items.push([doc.item.start, end]);
   doc.item = null;
 }
 
