@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -265,6 +265,54 @@ async function createRichSidecarArchive(basePath: string): Promise<void> {
   await mkdir(join(basePath, "analyze"), { recursive: true });
   await writeFile(join(basePath, "analyze", "allNamespaces"), "");
 }
+
+describe("estimateResourceSavings with a gateway in a sidecar mesh", () => {
+  let store: BugReportStore;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "resource-savings-gateway-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createRichSidecarArchive(archiveDir);
+    const pod = "istio-ingressgateway-7d9-abcde";
+    const gatewayPod = [
+      "apiVersion: v1",
+      "kind: Pod",
+      "metadata:",
+      `  name: ${pod}`,
+      "  namespace: istio-ingress",
+      "spec:",
+      "  containers:",
+      "    - name: istio-proxy",
+      "      resources:",
+      "        requests:",
+      "          cpu: '1'",
+      "          memory: 1Gi",
+    ].join("\n");
+    await appendFile(join(archiveDir, "cluster", "pods"), `\n---\n${gatewayPod}\n`);
+    const dir = join(archiveDir, "proxies", "istio-ingress", pod);
+    await mkdir(dir, { recursive: true });
+    const bootstrap = { "@type": "type.googleapis.com/envoy.admin.v3.BootstrapConfigDump", bootstrap: { node: { id: `router~10.0.0.7~${pod}.istio-ingress~istio-ingress.svc.cluster.local` } } };
+    await writeFile(join(dir, "config_dump?include_eds"), JSON.stringify({ configs: [bootstrap] }, null, 2));
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("excludes gateways from sidecar totals and savings and reports them separately", () => {
+    const text = (estimateResourceSavings(store).content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("Sidecar Proxy Count: 2");
+    expect(text).toContain("Total CPU Requests: 400m (2 proxies)");
+    const section = text.split("--- Gateways (unchanged by an ambient migration) ---")[1];
+    expect(section).toBeDefined();
+    expect(section.split("\n---")[0]).toContain("Gateway Proxies: 1 — 1.0 cores CPU, 1.0 Gi memory");
+    const sidecarSection = text.split("--- Current Sidecar Resource Usage ---")[1].split("\n---")[0];
+    expect(sidecarSection).not.toContain("Gateway");
+    expect(text).not.toMatch(/istio-ingress\b.*sidecars/);
+  });
+});
 
 describe("estimateResourceSavings with an interop (ambient + sidecar) mesh", () => {
   let store: BugReportStore;

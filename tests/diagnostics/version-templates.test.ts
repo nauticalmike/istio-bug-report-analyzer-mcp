@@ -65,4 +65,12 @@ describe("DIAG-006 unsupported Istio version template", () => {
   it("does not fire on a supported minor", async () => {
     expect(await findingIdsFor(versions("1.31.2", "1.31.2"))).not.toContain("DIAG-006");
   });
+
+  it("does not fire on a Solo build inside the n-4 window", async () => {
+    expect(await findingIdsFor(versions("1.27.9-solo", "1.27.9-solo"))).not.toContain("DIAG-006");
+  });
+
+  it("fires on a Solo build older than the n-4 window", async () => {
+    expect(await findingIdsFor(versions("1.26.8-solo", "1.26.8-solo"))).toContain("DIAG-006");
+  });
 });

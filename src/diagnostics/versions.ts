@@ -56,9 +56,16 @@ export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
   return issues;
 }
 
-export function findUnsupportedVersions(versions: VersionInfo | null, supported: string[]): VersionIssue[] {
+/**
+ * Community builds are checked against the upstream window; `-solo` builds against Solo's
+ * (longer, n-4) window when one is given, and are skipped otherwise.
+ */
+export function findUnsupportedVersions(
+  versions: VersionInfo | null,
+  supported: string[],
+  supportedSolo?: string[],
+): VersionIssue[] {
   if (!versions) return [];
-  const supportedSet = new Set(supported);
   const checks: { role: string; version: string | null }[] = [
     { role: "client (istioctl)", version: versions.clientVersion },
     ...versions.controlPlaneVersions.map((v) => ({ role: `control plane (${v.revision})`, version: v.version })),
@@ -66,13 +73,18 @@ export function findUnsupportedVersions(versions: VersionInfo | null, supported:
 
   const issues: VersionIssue[] = [];
   for (const { role, version } of checks) {
-    // Solo builds follow Solo's own (longer) support policy, not the upstream window.
-    if (version?.includes("-solo")) continue;
+    const solo = version?.includes("-solo") ?? false;
+    if (solo && !supportedSolo) continue;
+    const window = solo ? supportedSolo! : supported;
     const m = parseMinor(version);
-    if (!m || supportedSet.has(label(m))) continue;
+    if (!m || window.includes(label(m))) continue;
+    // A minor newer than the window is newer than our data, not end of life.
+    const newest = window.map(parseMinor).filter((w): w is Minor => w !== null).sort((a, b) => distance(b, a))[0];
+    if (newest && distance(m, newest) > 0) continue;
+    const scope = solo ? "Solo distribution of Istio minor" : "Istio minor";
     issues.push({
       kind: "unsupported-version",
-      detail: `${role} ${version} is not a supported Istio minor (supported: ${supported.join(", ")})`,
+      detail: `${role} ${version} is not a supported ${scope} (supported: ${window.join(", ")})`,
     });
   }
   return issues;

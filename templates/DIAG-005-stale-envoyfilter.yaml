@@ -1,37 +1,49 @@
 id: DIAG-005
-name: EnvoyFilter Resources Detected
+name: Stale or Orphaned EnvoyFilter
 category: envoyfilter
 severity: warning
 appliesTo:
   - sidecar
   - interop
 description: >
-  One or more EnvoyFilter resources are present. EnvoyFilters are fragile —
-  they patch Envoy config at a specific structure that changes across versions.
+  One or more EnvoyFilters no longer line up with the mesh: they select no running
+  workload, reference a target that does not exist, match on deprecated Envoy filter
+  names that Istio 1.19+ no longer translates, carry xDS v2 type URLs that current
+  Envoy no longer accepts, or are pinned to a proxyVersion that no running proxy has
+  (or that is not a valid regular expression, which makes them apply to every proxy).
 rootCause: >
-  EnvoyFilters were created to customize proxy behavior beyond what Istio APIs support.
-  They are version-specific and may silently break after Istio upgrades.
+  EnvoyFilters patch generated Envoy config by structure and name. Upgrades, renamed
+  filters and removed workloads leave them behind; Istio does not validate that a
+  patch still applies, so a stale filter is silently skipped or applied to the wrong place.
 impact: >
-  Stale or misconfigured EnvoyFilters can cause traffic routing failures,
-  proxy crashes, or silent config rejection. They are the #1 cause of
-  post-upgrade breakage.
+  The customization the filter provided (headers, Lua, rate limits, auth) is silently
+  missing, or a patch built for an older Envoy is rejected and blocks config for the
+  affected proxies. Stale EnvoyFilters are a leading cause of post-upgrade breakage.
 signals:
   - source:
-      type: resource
-      kind: EnvoyFilter
-      field: "kind"
+      type: envoyfilter_risks
     check:
       op: exists
 remediation:
   - order: 1
-    description: "Audit each EnvoyFilter for version compatibility with the current Istio version"
-    effort: medium
+    description: "Delete EnvoyFilters that select no workload or target nothing, after confirming with their owners"
+    command: "kubectl get envoyfilter -A"
+    effort: low
     risk: low
   - order: 2
-    description: "Replace EnvoyFilters with native Istio APIs where possible (e.g. Telemetry, WasmPlugin)"
+    description: "Rewrite v2-era filter names (envoy.router, envoy.http_connection_manager, ...) to the canonical envoy.filters.* names and v2 type URLs to v3"
+    effort: medium
+    risk: medium
+  - order: 3
+    description: "Update or remove proxyVersion match conditions so the patch applies to the running proxy version, and test after every upgrade"
+    effort: medium
+    risk: medium
+  - order: 4
+    description: "Replace EnvoyFilters with native Istio APIs where possible (Telemetry, WasmPlugin, AuthorizationPolicy, RequestAuthentication)"
     effort: high
     risk: medium
 references:
   - "https://istio.io/latest/docs/reference/config/networking/envoy-filter/"
+  - "https://www.envoyproxy.io/docs/envoy/latest/version_history/v1.14.0#deprecated"
 enrichmentHints:
-  docsQuery: "EnvoyFilter migration alternatives Istio"
+  docsQuery: "EnvoyFilter upgrade compatibility proxyVersion"

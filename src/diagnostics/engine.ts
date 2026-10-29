@@ -5,6 +5,35 @@ import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } fro
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
+import { demoProfileEvidence, riskyEnvoyFilters, singleReplicaIstiods, type Issue } from "./checks.js";
+
+// Sources that compute a list of issues: the signal value is the list (null when empty)
+// and each issue's detail is reported as an affected resource.
+const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportStore, source: Signal["source"]) => Issue[]>> = {
+  version_skew: (store) => findVersionSkew(store.getVersions()),
+  version_support: (store, source) =>
+    source.type === "version_support"
+      ? findUnsupportedVersions(store.getVersions(), source.supported ?? [], source.supportedSolo)
+      : [],
+  envoyfilter_risks: (store) => riskyEnvoyFilters(store),
+  demo_profile: (store) => demoProfileEvidence(store),
+  istiod_replicas: (store) => singleReplicaIstiods(store),
+};
+
+/** Per-run memo of issue sources, keyed by the source definition. */
+type IssueCache = Map<string, Issue[]>;
+
+function issuesFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): Issue[] | null {
+  const compute = ISSUE_SOURCES[source.type];
+  if (!compute) return null;
+  const key = JSON.stringify(source);
+  let issues = cache.get(key);
+  if (!issues) {
+    issues = compute(store, source);
+    cache.set(key, issues);
+  }
+  return issues;
+}
 
 export class DiagnosticEngine {
   private templates: DiagnosticTemplate[] = [];
@@ -32,6 +61,7 @@ export class DiagnosticEngine {
 
   async run(store: BugReportStore, categories?: string[], mode?: DataPlaneMode): Promise<DiagnosticFinding[]> {
     const findings: DiagnosticFinding[] = [];
+    const issueCache: IssueCache = new Map();
 
     for (const template of this.templates) {
       if (categories && !categories.includes(template.category)) continue;
@@ -39,23 +69,19 @@ export class DiagnosticEngine {
 
       let allMatch = true;
       for (const signal of template.signals) {
-        if (!(await this.evaluateSignal(signal, store))) {
+        if (!(await this.evaluateSignal(signal, store, issueCache))) {
           allMatch = false;
           break;
         }
       }
 
       if (allMatch) {
-        if (template.id === "DIAG-003") {
-          if (store.getIstiodPods().length >= 2) continue;
-        }
-
         findings.push({
           templateId: template.id,
           templateName: template.name,
           category: template.category,
           severity: template.severity,
-          affectedResources: this.collectAffectedResources(template, store),
+          affectedResources: this.collectAffectedResources(template, store, issueCache),
           description: template.description,
           rootCause: template.rootCause,
           impact: template.impact,
@@ -69,12 +95,14 @@ export class DiagnosticEngine {
     return findings;
   }
 
-  private async evaluateSignal(signal: Signal, store: BugReportStore): Promise<boolean> {
-    const value = await this.resolveSignalValue(signal.source, store);
+  private async evaluateSignal(signal: Signal, store: BugReportStore, cache: IssueCache): Promise<boolean> {
+    const value = await this.resolveSignalValue(signal.source, store, cache);
     return evaluateCheck(signal.check, value);
   }
 
-  private async resolveSignalValue(source: Signal["source"], store: BugReportStore): Promise<unknown> {
+  private async resolveSignalValue(source: Signal["source"], store: BugReportStore, cache: IssueCache): Promise<unknown> {
+    const issues = issuesFor(source, store, cache);
+    if (issues) return issues.length > 0 ? issues : null;
     switch (source.type) {
       case "analyze": {
         const results = store.getAnalyzeResults({
@@ -85,14 +113,6 @@ export class DiagnosticEngine {
       }
       case "version": {
         return store.getVersions();
-      }
-      case "version_skew": {
-        const issues = findVersionSkew(store.getVersions());
-        return issues.length > 0 ? issues : null;
-      }
-      case "version_support": {
-        const issues = findUnsupportedVersions(store.getVersions(), source.supported ?? []);
-        return issues.length > 0 ? issues : null;
       }
       case "resource": {
         const resources = store.getClusterResources({ kind: source.kind });
@@ -151,16 +171,14 @@ export class DiagnosticEngine {
     }
   }
 
-  private collectAffectedResources(template: DiagnosticTemplate, store: BugReportStore): string[] {
+  private collectAffectedResources(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): string[] {
     const affected: string[] = [];
     for (const signal of template.signals) {
       if (signal.source.type === "analyze") {
         const results = store.getAnalyzeResults({ code: signal.source.code });
         affected.push(...results.map((r) => r.resource));
-      } else if (signal.source.type === "version_skew") {
-        affected.push(...findVersionSkew(store.getVersions()).map((i) => i.detail));
-      } else if (signal.source.type === "version_support") {
-        affected.push(...findUnsupportedVersions(store.getVersions(), signal.source.supported ?? []).map((i) => i.detail));
+      } else {
+        affected.push(...(issuesFor(signal.source, store, cache) ?? []).map((i) => i.detail));
       }
     }
     return [...new Set(affected)];

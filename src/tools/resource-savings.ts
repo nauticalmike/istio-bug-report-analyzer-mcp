@@ -13,6 +13,10 @@ const DEFAULT_ZTUNNEL_MEMORY_REQUEST = 512; // 512Mi
 const DEFAULT_WAYPOINT_CPU_REQUEST = 0.1; // 100m
 const DEFAULT_WAYPOINT_MEMORY_REQUEST = 256; // 256Mi
 
+// Istio gateway chart default requests (per gateway pod)
+const DEFAULT_GATEWAY_CPU_REQUEST = 0.1; // 100m
+const DEFAULT_GATEWAY_MEMORY_REQUEST = 128; // 128Mi
+
 interface ResourceQuantity {
   cpu: number; // cores
   memory: number; // MiB
@@ -121,6 +125,24 @@ export function estimateResourceSavings(store: BugReportStore) {
   const sidecars = proxyPods.filter((p) => p.proxyType === "sidecar");
   const ztunnels = proxyPods.filter((p) => p.proxyType === "ztunnel");
   const waypoints = proxyPods.filter((p) => p.proxyType === "waypoint");
+  const gateways = proxyPods.filter((p) => p.proxyType === "gateway");
+
+  // Gateways stay in place across a sidecar-to-ambient migration: report them, never count them as savings.
+  let totalGatewayCpu = 0;
+  let totalGatewayMemory = 0;
+  for (const proxy of gateways) {
+    const pod = pods.find(
+      (p) => p.metadata.name === proxy.podName && p.metadata.namespace === proxy.namespace,
+    );
+    const res = pod ? getContainerResources(pod, "istio-proxy") : null;
+    totalGatewayCpu += res?.cpu ?? DEFAULT_GATEWAY_CPU_REQUEST;
+    totalGatewayMemory += res?.memory ?? DEFAULT_GATEWAY_MEMORY_REQUEST;
+  }
+  const gatewaySection = [
+    "",
+    "--- Gateways (unchanged by an ambient migration) ---",
+    `Gateway Proxies: ${gateways.length} — ${formatCpu(totalGatewayCpu)} CPU, ${formatMemory(totalGatewayMemory)} memory`,
+  ];
 
   // --- Extract actual sidecar resources from Pod specs ---
   const sidecarResources: { namespace: string; cpu: number; memory: number }[] = [];
@@ -253,6 +275,7 @@ export function estimateResourceSavings(store: BugReportStore) {
         `Cluster Memory consumed by sidecars: ${pct(totalSidecarMemory, totalAllocatableMemory)}`,
       );
     }
+    if (gateways.length > 0) lines.push(...gatewaySection);
 
     lines.push("", `--- Projected Ambient Resource Usage ---`);
 
@@ -330,6 +353,7 @@ export function estimateResourceSavings(store: BugReportStore) {
       `Waypoint Proxies: ${waypoints.length}`,
       `Waypoint Total: ${formatCpu(totalWaypointCpu)} CPU, ${formatMemory(totalWaypointMemory)} memory`,
     );
+    if (gateways.length > 0) lines.push(...gatewaySection);
 
     if (totalAllocatableCpu > 0) {
       const totalAmbient = totalZtunnelCpu + totalWaypointCpu;

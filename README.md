@@ -80,7 +80,7 @@ The tool extracts actual resource requests from Pod specs when available, fallin
 
 Archives from `istioctl bug-report` 1.18 through 1.31 load, including the flat (1.30+) and wrapped tar layouts. Validated end to end against Istio 1.31.2 on a mixed ambient + sidecar mesh (sidecars, ztunnel, waypoint).
 
-The EOL check (`DIAG-006`) follows the upstream support window (currently 1.30 and 1.31; the list lives in `templates/DIAG-006-unsupported-version.yaml`). Solo builds (`-solo`) follow Solo's own support policy and are not flagged.
+The EOL check (`DIAG-006`) holds community builds to the [upstream support window](https://istio.io/latest/docs/releases/supported-releases/) (currently 1.30 and 1.31) and Solo distributions of Istio (`-solo`) to [Solo's n-4 window](https://docs.solo.io/istio/latest/reference/versions/) (currently 1.27 through 1.31). Both lists live in `templates/DIAG-006-unsupported-version.yaml`. A weekly workflow (`.github/workflows/istio-support-window.yml`) runs `node scripts/check-istio-support.mjs` and fails when the upstream list drifts from istio.io; the Solo list is updated by hand when Solo ships a new stable minor.
 
 ## Solo.io Integration
 

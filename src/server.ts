@@ -144,7 +144,6 @@ export function createServer(config: ServerConfig) {
     async () => {
       const store = getStore();
       if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
-      await store.ensureClusterResources();
       return getOverview(store);
     },
   );

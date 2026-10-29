@@ -4,18 +4,27 @@ category: version
 severity: warning
 description: >
   The control plane or istioctl client runs an Istio minor version that is
-  outside the upstream support window and no longer receives security fixes.
+  outside its support window and no longer receives security fixes. Community
+  builds follow the upstream window; Solo distributions of Istio (-solo) follow
+  Solo's n-4 window.
 rootCause: >
   The mesh has not been upgraded since its minor version reached end of life.
 impact: >
   Known CVEs may be unpatched, bug fixes are no longer backported, and newer
   Kubernetes versions may not be tested against this release.
 signals:
-  # Upstream window as of 2026-10-20: 1.29 EOL 2026-10-15, 1.28 EOL 2026-07-01.
-  # Update this list on each Istio minor release / EOL.
+  # Last verified 2026-10-20.
+  # supported: upstream window from istio.io supported-releases (1.29 EOL 2026-10-15,
+  #   1.28 EOL 2026-07-01). The weekly "Istio support window" workflow
+  #   (scripts/check-istio-support.mjs) fails when this list drifts from istio.io.
+  # supportedSolo: "Solo supports n-4 versions for Solo distributions of Istio" and
+  #   n-4 patching applies "only with a -solo distribution of Istio, not community
+  #   Istio versions" (docs.solo.io/istio/1.31.x/reference/versions/, n = 1.31).
+  #   Shift by one minor when Solo ships a new stable minor.
   - source:
       type: version_support
       supported: ["1.30", "1.31"]
+      supportedSolo: ["1.27", "1.28", "1.29", "1.30", "1.31"]
     check:
       op: exists
 remediation:
@@ -26,6 +35,7 @@ remediation:
     risk: medium
 references:
   - "https://istio.io/latest/docs/releases/supported-releases/"
+  - "https://docs.solo.io/istio/latest/reference/versions/"
   - "https://istio.io/latest/docs/setup/upgrade/canary/"
 enrichmentHints:
   docsQuery: "Istio canary upgrade supported releases"

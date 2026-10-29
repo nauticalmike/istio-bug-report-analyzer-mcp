@@ -90,7 +90,7 @@ export interface AnalyzeResult {
 
 export type DataPlaneMode = "sidecar" | "ambient" | "interop";
 
-export type ProxyType = "sidecar" | "ztunnel" | "waypoint" | "unknown";
+export type ProxyType = "sidecar" | "ztunnel" | "waypoint" | "gateway" | "unknown";
 
 export interface DataPlaneModeInfo {
   mode: DataPlaneMode;
@@ -144,7 +144,10 @@ export type SignalSource =
   | { type: "istiod"; endpoint: string; path: string }
   | { type: "version" }
   | { type: "version_skew" }
-  | { type: "version_support"; supported: string[] };
+  | { type: "version_support"; supported: string[]; supportedSolo?: string[] }
+  | { type: "envoyfilter_risks" }
+  | { type: "demo_profile" }
+  | { type: "istiod_replicas" };
 
 export type SignalCheck =
   | { op: "exists" }

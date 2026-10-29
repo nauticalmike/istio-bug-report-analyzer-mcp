@@ -9,20 +9,28 @@ rootCause: >
   Istio was installed with --set profile=demo or equivalent settings.
   Demo profile enables all features with minimal resources.
 impact: >
-  Minimal resource allocations, 100% trace sampling, debug-level access
-  logging, no HPA/PDB, relaxed security defaults.
+  Minimal resource allocations (istiod requests 10m CPU / 100Mi memory), 100% trace
+  sampling, an egress gateway, access logging to stdout and no autoscaling for istiod
+  or the gateways.
 signals:
+  # Requires istiod requests at the demo values (10m / 100Mi) plus at least one other
+  # demo-profile setting. Access logging to stdout alone never triggers this.
   - source:
-      type: istiod
-      endpoint: mesh
-      path: "accessLogFile"
+      type: demo_profile
     check:
-      op: equals
-      value: "/dev/stdout"
+      op: exists
 remediation:
   - order: 1
     description: "Migrate to Helm-based installation with production values"
     effort: high
     risk: medium
+  - order: 2
+    description: "Raise istiod resource requests and enable autoscaling (production defaults: 500m CPU / 2Gi memory)"
+    effort: low
+    risk: low
+  - order: 3
+    description: "Lower trace sampling (PILOT_TRACE_SAMPLING / meshConfig.defaultConfig.tracing.sampling) to a production rate such as 1%"
+    effort: trivial
+    risk: none
 references:
   - "https://istio.io/latest/docs/setup/additional-setup/config-profiles/"

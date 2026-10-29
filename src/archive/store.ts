@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync } from "node:fs";
 import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
+import { extractNamespaceResourcesFromFile } from "./namespace-scan.js";
 import { parseYamlMultiDoc, parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import type {
   VersionInfo,
@@ -108,6 +109,7 @@ export class BugReportStore {
   private istiodPods = new Map<string, IstiodInfo[]>();
   private clusterResources: ParsedResource[] | null = null;
   private clusterLoad: Promise<ParsedResource[]> | null = null;
+  private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
 
   private constructor(index: ArchiveIndex) {
@@ -215,6 +217,37 @@ export class BugReportStore {
     return this.clusterLoad;
   }
 
+  /**
+   * Namespace objects with the same order and first-wins dedup as the full parse,
+   * scanned out of the dumps without parsing the rest (mode detection needs only these).
+   */
+  private loadNamespaceResources(): ParsedResource[] {
+    if (this.clusterResources) return this.clusterResources.filter((r) => r.kind === "Namespace");
+    if (this.namespaceResources) return this.namespaceResources;
+    const seen = new Set<string>();
+    const namespaces: ParsedResource[] = [];
+    for (const file of CLUSTER_DUMP_FILES) {
+      for (const ns of extractNamespaceResourcesFromFile(this.pathIndex.get(file))) {
+        const key = resourceKey(ns);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        namespaces.push(ns);
+      }
+    }
+    this.namespaceResources = namespaces;
+    return namespaces;
+  }
+
+  isClusterResourcesParsed(): boolean {
+    return this.clusterResources !== null;
+  }
+
+  /** Cluster dump files present in the archive and their total size, from the index (no reads). */
+  getClusterDumpSummary(): { files: number; bytes: number } {
+    const dumps = this.index.files.filter((f) => CLUSTER_DUMP_FILES.includes(f.relativePath));
+    return { files: dumps.length, bytes: dumps.reduce((sum, f) => sum + f.size, 0) };
+  }
+
   // === Public Query Methods ===
 
   getVersions(): VersionInfo | null {
@@ -320,7 +353,7 @@ export class BugReportStore {
     const hasSidecars = allProxies.some((p) => p.proxyType === "sidecar");
 
     // Check namespace labels for ambient mode
-    const namespaces = this.loadClusterResources().filter((r) => r.kind === "Namespace");
+    const namespaces = this.loadNamespaceResources();
     const ambientNamespaces = namespaces
       .filter((ns) => ns.metadata?.labels?.["istio.io/dataplane-mode"] === "ambient")
       .map((ns) => ns.metadata.name);
@@ -390,17 +423,86 @@ const PROXY_SECTION_FILES: Record<string, string> = {
   stats: "stats/prometheus",
 };
 
-function classifyProxyType(podName: string): ProxyType {
+/** Reads at most `bytes` from the start of a file; null when missing or unreadable. */
+function readHead(absolutePath: string | undefined, bytes: number): string | null {
+  if (!absolutePath) return null;
+  let fd: number | undefined;
+  try {
+    fd = openSync(absolutePath, "r");
+    const buf = Buffer.alloc(bytes);
+    const n = readSync(fd, buf, 0, bytes, 0);
+    return buf.toString("utf-8", 0, n);
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+// The Envoy BootstrapConfigDump is the first entry of config_dump; its node id is `<type>~<ip>~<pod>.<ns>~<domain>`.
+const NODE_TYPE_RE = /"id"\s*:\s*"(sidecar|router|waypoint)~/;
+// pilot-agent logs its role once at startup; long-running pods may have rotated it out of the collected log.
+const LOG_ROLE_RE = /\tProxy role\t[^\n]*\btype=(sidecar|router|waypoint)\b/;
+// JSON log format (`--log_as_json`): fields may appear in any order on the line.
+const JSON_ROLE_LINE_RE = /^\{[^\n]*"msg"\s*:\s*"Proxy role"[^\n]*$/m;
+const JSON_ROLE_TYPE_RE = /"type"\s*:\s*"(sidecar|router|waypoint)"/;
+// Istio gateway naming: istio-{ingress,egress,eastwest}gateway, *-ingressgateway, *-egressgateway,
+// *eastwest*, and Gateway API deployments `<gateway>-istio-<replicaset hash>-<pod suffix>`.
+const GATEWAY_NAME_RE = /(^|-)(ingress|egress|eastwest)gateway(-|$)|eastwest|-istio-[a-z0-9]{6,10}-[a-z0-9]{5}$/;
+
+function logRole(head: string): string | null {
+  const tab = LOG_ROLE_RE.exec(head);
+  if (tab) return tab[1];
+  const line = JSON_ROLE_LINE_RE.exec(head);
+  return line ? (JSON_ROLE_TYPE_RE.exec(line[0])?.[1] ?? null) : null;
+}
+// ztunnel (Rust) dumps start with these sections instead of Envoy's `configs` array.
+const ZTUNNEL_DUMP_RE = /"(certificates|workloads|services|policies)"\s*:/;
+const DUMP_HEAD_BYTES = 64 * 1024;
+const LOG_HEAD_BYTES = 256 * 1024;
+
+function fromNodeType(nodeType: string, podName: string): ProxyType {
+  if (nodeType === "sidecar") return "sidecar";
+  if (nodeType === "waypoint") return "waypoint";
+  // Before Istio 1.22 waypoints also reported as `router`.
+  return podName.includes("waypoint") ? "waypoint" : "gateway";
+}
+
+/**
+ * Classifies a proxy from the cheapest reliable evidence: the ztunnel DaemonSet
+ * name, then the bootstrap node type at the head of config_dump, then the
+ * startup role line of the log, then the pod name. Reads only file heads.
+ */
+function classifyProxyType(podName: string, files: Map<string, string>): ProxyType {
   if (podName.startsWith("ztunnel-")) return "ztunnel";
+
+  const dumpHead = readHead(files.get("config_dump?include_eds") ?? files.get("config_dump"), DUMP_HEAD_BYTES);
+  if (dumpHead) {
+    const node = NODE_TYPE_RE.exec(dumpHead);
+    if (node) return fromNodeType(node[1], podName);
+    // A ztunnel-format dump on a pod that is not the ztunnel DaemonSet: a ztunnel-based (e.g. east-west) gateway.
+    if (!/"configs"\s*:/.test(dumpHead) && ZTUNNEL_DUMP_RE.test(dumpHead)) {
+      return podName.includes("ztunnel") ? "ztunnel" : "gateway";
+    }
+  }
+
+  const role = logRole(readHead(files.get("istio-proxy.log"), LOG_HEAD_BYTES) ?? "");
+  if (role) return fromNodeType(role, podName);
+
   if (podName.includes("waypoint")) return "waypoint";
+  if (GATEWAY_NAME_RE.test(podName)) return "gateway";
   return "sidecar";
 }
 
 function makeLazyProxyInfo(namespace: string, podName: string, files: Map<string, string>): ProxyInfo {
+  let proxyType: ProxyType | undefined;
   return {
     namespace,
     podName,
-    proxyType: classifyProxyType(podName),
+    // Classified on first access so loading an archive reads no proxy files.
+    get proxyType() {
+      return (proxyType ??= classifyProxyType(podName, files));
+    },
     get logs() {
       return readNow(files.get("istio-proxy.log"));
     },

@@ -69,8 +69,36 @@ describe("findUnsupportedVersions", () => {
     ]);
   });
 
+  it("does not flag minors newer than the window (newer than our data, not EOL)", () => {
+    expect(findUnsupportedVersions(info(["1.32.0", "2.0.0"], [], "1.32.0"), supported)).toEqual([]);
+  });
+
   it("does not apply the upstream window to Solo builds", () => {
     expect(findUnsupportedVersions(info(["1.28.4-solo"], [], "1.28.4-solo"), supported)).toEqual([]);
+  });
+
+  describe("with a Solo (n-4) window", () => {
+    const solo = ["1.27", "1.28", "1.29", "1.30", "1.31"];
+
+    it("accepts a Solo build inside the Solo window but outside the upstream one", () => {
+      expect(findUnsupportedVersions(info(["1.27.9-solo"], [], "1.28.4-solo"), supported, solo)).toEqual([]);
+    });
+
+    it("flags a Solo build older than the Solo window, citing the Solo list", () => {
+      const issues = findUnsupportedVersions(info(["1.26.8-solo"], []), supported, solo);
+      expect(issues).toHaveLength(1);
+      expect(issues[0].detail).toContain("control plane (default) 1.26.8-solo");
+      expect(issues[0].detail).toContain("Solo distribution");
+      expect(issues[0].detail).toContain("1.27, 1.28, 1.29, 1.30, 1.31");
+    });
+
+    it("does not flag Solo builds newer than the Solo window", () => {
+      expect(findUnsupportedVersions(info(["1.32.0-solo", "2.0.0-solo"], []), supported, solo)).toEqual([]);
+    });
+
+    it("still holds community builds to the upstream window", () => {
+      expect(findUnsupportedVersions(info(["1.28.10"], []), supported, solo).map((i) => i.kind)).toEqual(["unsupported-version"]);
+    });
   });
 
   it("ignores supported and unparsable versions", () => {

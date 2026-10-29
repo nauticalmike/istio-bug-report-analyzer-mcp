@@ -12,20 +12,35 @@ impact: >
   If the single istiod pod is evicted, restarted, or experiences a failure,
   all proxy configuration updates stop. New pods cannot get sidecar injection.
 signals:
+  # Effective minimum replicas per istiod Deployment (HPA minReplicas when one targets it,
+  # else spec.replicas); falls back to the istiod pods collected when no Deployment is dumped.
   - source:
-      type: istiod
-      endpoint: syncz
-      path: ""
+      type: istiod_replicas
     check:
       op: exists
 remediation:
   - order: 1
-    description: "Scale istiod to at least 2 replicas"
-    command: "kubectl scale deployment istiod -n istio-system --replicas=2"
+    description: >-
+      Raise the floor at its source for each Deployment listed under Affected (each entry
+      names the Helm key for its control-plane version). With an HPA (the default), set
+      the HPA's minReplicas to 2: the istiod Helm chart reads top-level autoscaleMin from
+      1.24 and pilot.autoscaleMin up to 1.23 (the other key is silently ignored); for
+      IstioOperator use spec.components.pilot.k8s.hpaSpec.minReplicas. Scaling the
+      Deployment directly is reverted by the HPA and by the next install.
+    command: "helm upgrade <istiod-release> istio/istiod -n istio-system --reuse-values --set autoscaleMin=2   # 1.23 and older: --set pilot.autoscaleMin=2"
     effort: trivial
     risk: none
   - order: 2
-    description: "Add a PodDisruptionBudget for istiod"
+    description: >-
+      Without an HPA (autoscaleEnabled=false), set replicaCount to 2: top-level
+      replicaCount from istiod chart 1.24, pilot.replicaCount up to 1.23, or
+      spec.components.pilot.k8s.replicaCount for IstioOperator. For revisioned installs,
+      apply it to the release that owns that revision's Deployment (e.g. istiod-1-31).
+    command: "helm upgrade <istiod-release> istio/istiod -n istio-system --reuse-values --set replicaCount=2   # 1.23 and older: --set pilot.replicaCount=2"
+    effort: trivial
+    risk: none
+  - order: 3
+    description: "Keep a PodDisruptionBudget for istiod so node drains cannot take every replica at once (the istiod chart creates one by default when replicas allow it)"
     yaml: |
       apiVersion: policy/v1
       kind: PodDisruptionBudget

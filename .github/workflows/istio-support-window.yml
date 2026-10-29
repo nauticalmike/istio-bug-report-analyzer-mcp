@@ -1,0 +1,26 @@
+name: Istio support window
+
+# Network-dependent, so it runs on a schedule rather than on push/PRs.
+on:
+  schedule:
+    - cron: "17 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          # Caching runs the bundled npm in the repo before the upgrade below, which devEngines rejects.
+          package-manager-cache: false
+      # npm 10 crashes in arborist (#loadPeerSet) on this tree; package.json devEngines requires >=11.21.
+      - run: npm install -g npm@11.21.1
+      - run: npm ci
+      - name: Compare DIAG-006 with istio.io supported releases
+        run: node scripts/check-istio-support.mjs
