@@ -17,10 +17,13 @@ export function toOffset(offset: number | undefined): number {
   return Math.max(0, Math.floor(offset ?? 0));
 }
 
-/** Shortens a line to `max` characters, saying how much was cut. */
-export function clampLine(line: string, max = MAX_LINE_CHARS): string {
-  if (line.length <= max) return line;
-  return `${line.slice(0, max)} … [${(line.length - max).toLocaleString("en-US")} more chars]`;
+/**
+ * Shortens a line to `max` characters, saying how much was cut. `fullLength` is the
+ * line's real length when `line` is already only its start (a line cut while streaming).
+ */
+export function clampLine(line: string, max = MAX_LINE_CHARS, fullLength = line.length): string {
+  if (fullLength <= max) return line;
+  return `${line.slice(0, max)} … [${(fullLength - max).toLocaleString("en-US")} more chars]`;
 }
 
 /**

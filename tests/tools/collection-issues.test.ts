@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -108,5 +108,26 @@ describe("collection issues in tool output", () => {
     const clean = await BugReportStore.fromDirectory(cleanDir);
     const text = ((await getOverview(clean)).content[0] as { type: "text"; text: string }).text;
     expect(text).not.toContain("Collection issues");
+  });
+});
+
+describe("getCollectionIssues on an unreadable bug-report.log", () => {
+  let tempDir: string;
+
+  afterAll(async () => {
+    if (!tempDir) return;
+    await chmod(join(tempDir, "bug-report", "bug-report.log"), 0o644).catch(() => {});
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("reports the read failure instead of an empty list", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "collection-issues-unreadable-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const store = await BugReportStore.fromDirectory(archiveDir);
+    await chmod(join(archiveDir, "bug-report.log"), 0o000);
+    const issues = await getCollectionIssues(store);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toMatch(/^bug-report\.log could not be read: /);
   });
 });

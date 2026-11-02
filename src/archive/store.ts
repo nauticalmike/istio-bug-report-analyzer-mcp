@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
+import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
 import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
@@ -104,6 +105,7 @@ function resourceKey(r: ParsedResource): string {
 export class BugReportStore {
   private index: ArchiveIndex;
   private pathIndex = new Map<string, string>(); // relativePath -> absolutePath
+  private sizeIndex = new Map<string, number>(); // relativePath -> bytes
   private versions: VersionInfo | null = null;
   private analyzeResults: AnalyzeResult[] = [];
   private proxies = new Map<string, ProxyInfo[]>();
@@ -118,6 +120,7 @@ export class BugReportStore {
     this.index = index;
     for (const file of index.files) {
       this.pathIndex.set(file.relativePath, file.absolutePath);
+      this.sizeIndex.set(file.relativePath, file.size);
     }
   }
 
@@ -304,6 +307,21 @@ export class BugReportStore {
     }
   }
 
+  /**
+   * Streams a file line by line (see scanFileLines), for files of any size: whole-file
+   * reads fail past V8's ~512 MiB string limit. Null when the file is not in the archive;
+   * rejects when it cannot be read.
+   */
+  async scanFileLines(relativePath: string, onLine: LineHandler, opts?: LineScanOptions): Promise<LineScanStats | null> {
+    const absolutePath = this.pathIndex.get(relativePath);
+    if (!absolutePath) return null;
+    return scanFileLines(absolutePath, onLine, opts);
+  }
+
+  hasFile(relativePath: string): boolean {
+    return this.pathIndex.has(relativePath);
+  }
+
   // === Public Query Methods ===
 
   getVersions(): VersionInfo | null {
@@ -398,7 +416,7 @@ export class BugReportStore {
 
   /** Size in bytes from the archive index, or null when the file is not in the archive. */
   getFileSize(relativePath: string): number | null {
-    return this.index.files.find((f) => f.relativePath === relativePath)?.size ?? null;
+    return this.sizeIndex.get(relativePath) ?? null;
   }
 
   getAllFiles(): string[] {

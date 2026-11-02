@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdtemp, rm, mkdir, writeFile, appendFile, readdir } from "node:fs/promises";
+import { chmod, mkdtemp, rm, mkdir, writeFile, appendFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -62,5 +62,28 @@ describe("findErrors", () => {
     const result = await findErrors(store, {});
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toMatch(/\d+ unique/);
+  });
+});
+
+describe("findErrors with an unreadable log", () => {
+  let tempDir: string;
+  let logPath: string;
+
+  afterAll(async () => {
+    if (logPath) await chmod(logPath, 0o644).catch(() => {});
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("says which file it skipped instead of treating it as empty", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "errors-unreadable-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const store = await BugReportStore.fromDirectory(archiveDir);
+    const [pod] = store.getProxyPods();
+    logPath = join(archiveDir, "proxies", pod.namespace, pod.podName, "istio-proxy.log");
+    await chmod(logPath, 0o000);
+    const text = ((await findErrors(store, { component: "proxy" })).content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("No error/warning lines found.");
+    expect(text).toContain(`1 log file(s) could not be read and were skipped: proxies/${pod.namespace}/${pod.podName}/istio-proxy.log`);
   });
 });
