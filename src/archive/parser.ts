@@ -181,25 +181,33 @@ function parseOrNull(content: string): unknown | null {
 /**
  * Parses JSON, also when istioctl wrote log lines ahead of the body (seen on istiod debug
  * output such as push_status and syncz). Text before the JSON is dropped: first a `{` or `[`
- * that starts a line, then the first `{` or `[` anywhere, since a log line can itself hold brackets.
+ * that starts a line, then the first `{` or `[` anywhere, since a log line can itself hold
+ * brackets. A start in the middle of a line is accepted only for a non-empty object or
+ * array, so error text that ends in `[]` or `{}` stays text (null) instead of becoming empty data.
  */
 export function tryParseJson(content: string): unknown | null {
   const whole = parseOrNull(content);
   if (whole !== null) return whole;
 
   const head = content.slice(0, JSON_PREFIX_SEARCH_CHARS);
-  const starts: number[] = [];
-  for (const m of head.matchAll(/^[ \t]*([{[])/gm)) starts.push(m.index + m[0].length - 1);
+  const starts: { at: number; lineStart: boolean }[] = [];
+  for (const m of head.matchAll(/^[ \t]*([{[])/gm)) starts.push({ at: m.index + m[0].length - 1, lineStart: true });
   const anywhere = head.search(/[{[]/);
-  if (anywhere >= 0) starts.push(anywhere);
+  if (anywhere >= 0) starts.push({ at: anywhere, lineStart: false });
 
   const tried = new Set<number>([0]);
-  for (const start of starts) {
-    if (tried.has(start)) continue;
+  for (const { at, lineStart } of starts) {
+    if (tried.has(at)) continue;
     if (tried.size > MAX_JSON_START_CANDIDATES) break;
-    tried.add(start);
-    const parsed = parseOrNull(content.slice(start));
-    if (parsed !== null) return parsed;
+    tried.add(at);
+    const parsed = parseOrNull(content.slice(at));
+    if (parsed === null) continue;
+    if (lineStart || isNonEmptyContainer(parsed)) return parsed;
   }
   return null;
+}
+
+function isNonEmptyContainer(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  return typeof value === "object" && value !== null && Object.keys(value).length > 0;
 }

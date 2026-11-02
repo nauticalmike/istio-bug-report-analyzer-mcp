@@ -161,6 +161,19 @@ describe("tryParseJson", () => {
     expect(tryParseJson(content)).toEqual([{ proxy: "a.default", sync_status: "SYNCED" }]);
   });
 
+  it("keeps error text that merely ends in empty brackets as text", () => {
+    expect(tryParseJson("Error: no proxies matched the selector []")).toBeNull();
+    expect(tryParseJson("warn: empty config {}\n")).toBeNull();
+  });
+
+  it("accepts a non-empty object that starts mid-line", () => {
+    expect(tryParseJson('response from istiod: {"totalPushes": 3}')).toEqual({ totalPushes: 3 });
+  });
+
+  it("accepts an empty array that starts its own line after a log line", () => {
+    expect(tryParseJson("Warning: port-forward fell back\n[]\n")).toEqual([]);
+  });
+
   it("returns null when the text after the prefix is not JSON", () => {
     expect(tryParseJson("error: endpoint failed {not json")).toBeNull();
   });
