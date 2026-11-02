@@ -19,6 +19,7 @@ import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo 
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import { needsImageFallback, withImageFallback } from "./image-versions.js";
+import { scanCollectionIssues, type CollectionScan } from "../tools/collection-issues.js";
 import type {
   VersionInfo,
   AnalyzeResult,
@@ -147,6 +148,7 @@ export class BugReportStore {
   private fileEntries = new Map<string, FileEntry>();
   private scannedPodNames: PodNameScan | null = null;
   private cachedCompleteness: { parsed: boolean; value: Completeness } | null = null;
+  private collectionScan: CollectionScan | null = null;
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
@@ -160,6 +162,8 @@ export class BugReportStore {
     const index = await readArchiveDirectory(dirPath);
     const store = new BugReportStore(index);
     await store.loadAll();
+    // Streamed once here: the completeness verdict and the collection-issue lists both use it.
+    store.collectionScan = await scanCollectionIssues(store);
     return store;
   }
 
@@ -363,6 +367,11 @@ export class BugReportStore {
     return scanFileLines(absolutePath, onLine, opts);
   }
 
+  /** bug-report.log reduced to its collection issues at load; null when the archive has none. */
+  getCollectionScan(): CollectionScan | null {
+    return this.collectionScan;
+  }
+
   hasFile(relativePath: string): boolean {
     return this.pathIndex.has(relativePath);
   }
@@ -549,9 +558,10 @@ export class BugReportStore {
    * stale-dir check exact.
    */
   getCompleteness(): Completeness {
-    const parsed = this.clusterResources !== null;
-    if (this.cachedCompleteness?.parsed !== parsed) {
-      this.cachedCompleteness = { parsed, value: computeCompleteness(this, this.podNames()) };
+    if (this.cachedCompleteness?.parsed !== this.isClusterResourcesParsed()) {
+      const value = computeCompleteness(this, this.podNames());
+      // Keyed after computing: the versions check can parse the pod dump (image-tag fallback).
+      this.cachedCompleteness = { parsed: this.isClusterResourcesParsed(), value };
     }
     return this.cachedCompleteness.value;
   }

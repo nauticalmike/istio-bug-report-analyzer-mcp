@@ -128,23 +128,38 @@ export function parseCollectionIssues(content: string): CollectionIssue[] {
   return collector.issues();
 }
 
-async function scanCollectionIssues(store: BugReportStore): Promise<CollectionIssue[]> {
+/** bug-report.log reduced to its collection issues; `error` is set when the log could not be read. */
+export interface CollectionScan {
+  issues: CollectionIssue[];
+  error?: string;
+}
+
+/**
+ * Streams bug-report.log once through the collector. The store runs this at load and
+ * keeps the result, so the completeness verdict and the collection-issue lists share one
+ * read of a log that can be several GB. Null when the archive has no bug-report.log.
+ */
+export async function scanCollectionIssues(store: BugReportStore): Promise<CollectionScan | null> {
   const collector = new CollectionIssueCollector();
   try {
-    await store.scanFileLines(BUG_REPORT_LOG, (line) => collector.add(line));
+    if (!(await store.scanFileLines(BUG_REPORT_LOG, (line) => collector.add(line)))) return null;
   } catch (e) {
-    // Reported as an issue, not an empty list: an unreadable log is not a clean collection.
-    return [{ level: "error", message: `${BUG_REPORT_LOG} could not be read: ${e instanceof Error ? e.message : String(e)}`, count: 1 }];
+    return { issues: [], error: e instanceof Error ? e.message : String(e) };
   }
-  return collector.issues();
+  return { issues: collector.issues() };
 }
 
 const cache = new WeakMap<BugReportStore, Promise<CollectionIssue[]>>();
 
+/** The collection issues of the store's load-time scan of bug-report.log. */
 export function getCollectionIssues(store: BugReportStore): Promise<CollectionIssue[]> {
   let issues = cache.get(store);
   if (!issues) {
-    issues = scanCollectionIssues(store);
+    const scan = store.getCollectionScan();
+    // Reported as an issue, not an empty list: an unreadable log is not a clean collection.
+    issues = Promise.resolve(
+      scan?.error ? [{ level: "error" as const, message: `${BUG_REPORT_LOG} could not be read: ${scan.error}`, count: 1 }] : (scan?.issues ?? []),
+    );
     cache.set(store, issues);
   }
   return issues;

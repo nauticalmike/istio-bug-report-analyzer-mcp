@@ -1,10 +1,15 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { appendFile, mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { bugReportVersions, createMinimalArchive } from "../fixtures/create-fixture.js";
 import { BugReportStore } from "../../src/archive/store.js";
 import { formatCompleteness, type CompletenessSignalId } from "../../src/archive/completeness.js";
+import { writeRepeatedLog } from "../fixtures/create-log-fixture.js";
+import { dump } from "js-yaml";
+import { istiodPod, sidecarPod, unretrievableVersions } from "../diagnostics/template-harness.js";
+import { getCollectionIssues } from "../../src/tools/collection-issues.js";
+import { getVersions } from "../../src/tools/versions.js";
 
 describe("data completeness verdict", () => {
   let tempDir: string;
@@ -193,5 +198,64 @@ describe("data completeness verdict", () => {
     await utimes(old, fiveHoursAgo, fiveHoursAgo);
     const s = await signal("stale-proxy-dirs");
     expect(s.details.join("\n")).toMatch(/over ~5\.0 h/);
+  });
+
+  it("finds collection errors past the first 64 MiB of bug-report.log", async () => {
+    const info = Array.from({ length: 100 }, (_, i) => `2026-03-18T10:00:00.000Z\tinfo\tcollecting proxy ${i}`).join("\n") + "\n";
+    await writeRepeatedLog(join(dir, "bug-report.log"), 70 * 2 ** 20, info, "2026-03-18T11:00:00.000Z\terror\tfailed to list pods: Unauthorized\n");
+    const s = await signal("bug-report-log");
+    expect(s.status).toBe("gap");
+    expect(s.summary).toMatch(/auth x1/);
+    expect(s.summary).not.toMatch(/scanned/);
+  });
+
+  it("reads bug-report.log once per load for both the verdict and the collection issues", async () => {
+    await writeFile(join(dir, "bug-report.log"), "Error: failed to fetch /debug/syncz: the server could not find the requested resource (404)\n");
+    const spy = vi.spyOn(BugReportStore.prototype, "scanFileLines");
+    const ranges = vi.spyOn(BugReportStore.prototype, "readFileRange");
+    try {
+      const store = await load();
+      store.getCompleteness();
+      await getCollectionIssues(store);
+      expect(store.getCompletenessSignal("bug-report-log").status).toBe("gap");
+      expect(spy.mock.calls.filter(([path]) => path === "bug-report.log")).toHaveLength(1);
+      // Only the capture-time tail read; no second, bounded read of the whole log.
+      expect(ranges.mock.calls.filter(([path, , length]) => path === "bug-report.log" && length > 16 * 1024)).toHaveLength(0);
+    } finally {
+      spy.mockRestore();
+      ranges.mockRestore();
+    }
+  });
+
+  it("counts collection errors listed under an 'N errors occurred' header", async () => {
+    await writeFile(join(dir, "bug-report.log"), "Error: 2 errors occurred:\n\t* failed to get proxy-a: Forbidden\n\t* failed to get proxy-b: Forbidden\n");
+    const s = await signal("bug-report-log");
+    expect(s.status).toBe("gap");
+    expect(s.summary).toMatch(/auth x2/);
+  });
+
+  it("says when versions come from pod image tags instead of calling them unknown", async () => {
+    await writeFile(join(dir, "versions"), unretrievableVersions("1.31.2"));
+    await writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: [istiodPod("istiod-7f9c-abcde", "1.31.2"), sidecarPod("shop", "cart-1", "1.31.2")] }));
+    const s = await signal("versions");
+    expect(s.status).toBe("gap");
+    expect(s.summary).toMatch(/versions file unusable.*versions derived from pod image tags/);
+    expect(s.summary).not.toMatch(/unknown/);
+  });
+
+  it("keeps 'versions unknown' when neither the versions file nor pod images give a version", async () => {
+    await unlink(join(dir, "versions"));
+    expect((await signal("versions")).summary).toMatch(/unknown/);
+  });
+
+  it("agrees with the versions tool on an istioctl older than a control plane known from images", async () => {
+    await writeFile(join(dir, "versions"), unretrievableVersions("1.29.0"));
+    await writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: [istiodPod("istiod-7f9c-abcde", "1.31.2"), sidecarPod("shop", "cart-1", "1.31.2")] }));
+    const store = await load();
+    const s = store.getCompletenessSignal("istioctl-client");
+    const tool = (getVersions(store).content[0] as { text: string }).text;
+    expect(tool).toMatch(/istioctl client 1\.29\.0 is older than the control plane \(1\.31\)/);
+    expect(s.status).toBe("gap");
+    expect(s.summary).toMatch(/istioctl 1\.29\.0 is older than the control plane \(1\.31\)/);
   });
 });

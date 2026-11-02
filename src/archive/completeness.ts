@@ -1,13 +1,14 @@
 import { closeSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
-import { parseMinor } from "../diagnostics/versions.js";
-import { logLevel } from "../tools/log-level.js";
+import { clientBehindControlPlane, parseMinor } from "../diagnostics/versions.js";
 import type { BugReportStore } from "./store.js";
 
 /**
  * Data-completeness signals: what an archive is missing, so that output built on the
  * missing part is not read as "nothing is wrong". Each signal is computed from the file
- * index and small, bounded reads, so it is cheap enough to run at load.
+ * index, small bounded reads and the load-time scan of bug-report.log, so it is cheap
+ * enough to run at load. Only an unusable versions file costs more: the pod dump is then
+ * parsed for image tags (the same fallback get_overview and get_versions use).
  */
 export type CompletenessSignalId =
   | "versions"
@@ -44,8 +45,6 @@ export interface StaleProxyDirs {
 }
 
 const MAX_EXAMPLES = 5;
-// bug-report.log is read up to this size until the shared streaming log scanner lands.
-export const BUG_REPORT_LOG_SCAN_BYTES = 64 * 2 ** 20;
 // An idle istiod's syncz is "[]" or "null"; anything larger serves proxies.
 const IDLE_SYNCZ_MAX_BYTES = 4096;
 // A cluster dump this small with no object in it is empty (e.g. an empty List).
@@ -53,7 +52,7 @@ const EMPTY_DUMP_PROBE_BYTES = 4096;
 // Collection spans shorter than this are normal and not reported.
 const MIN_REPORTED_SPAN_MS = 10 * 60 * 1000;
 
-const ISTIO_CR_KINDS = new Set([
+export const ISTIO_CR_KINDS = new Set([
   "VirtualService", "DestinationRule", "Gateway", "ServiceEntry", "Sidecar", "EnvoyFilter",
   "WorkloadEntry", "WorkloadGroup", "PeerAuthentication", "RequestAuthentication",
   "AuthorizationPolicy", "Telemetry", "WasmPlugin", "ProxyConfig",
@@ -114,10 +113,20 @@ export function computeCompleteness(store: BugReportStore, pods: PodNames): Comp
 
 function versionsSignal(store: BugReportStore): CompletenessSignal {
   const versions = store.getVersions();
-  if (!versions) return signal("versions", "gap", "versions file missing: Istio versions are unknown");
-  const unable = /unable to retrieve[^\n]*/i.exec(versions.raw);
+  const unable = versions ? /unable to retrieve[^\n]*/i.exec(versions.raw) : null;
+  let problem: string | null = null;
+  if (!versions) problem = "versions file missing";
+  else if (versions.controlPlaneVersions.length === 0) {
+    problem = unable ? `versions file unusable ("${unable[0].trim().slice(0, 120)}")` : "versions file unusable (no control plane version)";
+  }
+  if (problem) {
+    // The same image-tag fallback get_overview, get_versions and the version diagnostics use.
+    const from = store.getEffectiveVersions()?.fromImages;
+    const derived = [from?.controlPlane ? "control plane" : "", from?.proxies ? "data plane" : ""].filter(Boolean);
+    if (derived.length > 0) return signal("versions", "gap", `${problem}; versions derived from pod image tags (${derived.join(", ")})`);
+    return signal("versions", "gap", `${problem}: Istio versions are unknown`);
+  }
   if (unable) return signal("versions", "gap", `istioctl could not read all versions ("${unable[0].trim().slice(0, 120)}")`);
-  if (versions.controlPlaneVersions.length === 0) return signal("versions", "gap", "versions file has no control plane version");
   return signal("versions", "ok", "versions recorded");
 }
 
@@ -215,51 +224,46 @@ function daemonLogsSignal(store: BugReportStore, pods: PodNames): CompletenessSi
 
 function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
   const file = "bug-report.log";
-  const size = store.getFileSize(file);
-  if (size === null) return signal("bug-report-log", "not_evaluated", `${file} not in the archive: collection errors cannot be checked`);
-  const range = store.readFileRange(file, 0, BUG_REPORT_LOG_SCAN_BYTES);
-  if (!range) return signal("bug-report-log", "not_evaluated", `${file} could not be read`);
+  const scan = store.getCollectionScan();
+  if (!scan) return signal("bug-report-log", "not_evaluated", `${file} not in the archive: collection errors cannot be checked`);
+  if (scan.error) return signal("bug-report-log", "not_evaluated", `${file} could not be read: ${scan.error}`);
 
+  // The collection issues are the log's error and warning lines, deduplicated; the bullets
+  // under an "N errors occurred:" header are the individual errors.
   const hits = new Map<string, { count: number; example: string }>();
-  for (const raw of range.text.split("\n")) {
-    const line = raw.trim();
-    if (!line || !(line.startsWith("Error:") || logLevel(line))) continue;
-    for (const { kind, re } of LOG_PROBLEMS) {
-      if (!re.test(line)) continue;
+  for (const issue of scan.issues) {
+    for (const text of [issue.message, ...(issue.details ?? [])]) {
+      const kind = LOG_PROBLEMS.find(({ re }) => re.test(text))?.kind;
+      if (!kind) continue;
       const hit = hits.get(kind);
-      if (hit) hit.count++;
-      else hits.set(kind, { count: 1, example: line.slice(0, 200) });
-      break;
+      if (hit) hit.count += issue.count;
+      else hits.set(kind, { count: issue.count, example: text.slice(0, 200) });
     }
   }
-  const partial = range.end < size;
-  const scanned = partial ? ` (first ${Math.round(range.end / 2 ** 20)} MiB of ${Math.round(size / 2 ** 20)} MiB scanned)` : "";
   if (hits.size > 0) {
     const kinds = [...hits].map(([kind, h]) => `${kind} x${h.count}`).join(", ");
     return signal(
       "bug-report-log",
       "gap",
-      `${file} has collection errors (${kinds}): some data may not have been fetched${scanned}`,
+      `${file} has collection errors (${kinds}): some data may not have been fetched`,
       [...hits].map(([kind, h]) => `${kind}: ${h.example}`),
     );
   }
-  if (partial) return signal("bug-report-log", "not_evaluated", `no auth/404/timeout errors in the part of ${file} scanned${scanned}`);
   return signal("bug-report-log", "ok", `no auth/404/timeout errors in ${file}`);
 }
 
 function clientSignal(store: BugReportStore): CompletenessSignal {
-  const versions = store.getVersions();
-  const client = parseMinor(versions?.clientVersion);
-  const cps = (versions?.controlPlaneVersions ?? []).map((v) => ({ v: v.version, m: parseMinor(v.version) })).filter((x) => x.m);
-  if (!versions || !client || cps.length === 0) {
+  // The same versions and minor comparison as the get_versions warning.
+  const versions = store.getEffectiveVersions();
+  if (!parseMinor(versions?.clientVersion) || !versions?.controlPlaneVersions.some((v) => parseMinor(v.version))) {
     return signal("istioctl-client", "not_evaluated", "istioctl and control plane versions are needed to compare them");
   }
-  const newest = cps.reduce((a, b) => (b.m!.major * 1000 + b.m!.minor > a.m!.major * 1000 + a.m!.minor ? b : a));
-  if (client.major * 1000 + client.minor < newest.m!.major * 1000 + newest.m!.minor) {
+  const behind = clientBehindControlPlane(versions);
+  if (behind) {
     return signal(
       "istioctl-client",
       "gap",
-      `istioctl ${versions.clientVersion} is older than the control plane (${newest.v}): it may not collect newer data; re-collect with a matching istioctl`,
+      `istioctl ${behind.client} is older than the control plane (${behind.controlPlane}): it may not collect newer data; re-collect with a matching istioctl`,
     );
   }
   return signal("istioctl-client", "ok", `istioctl ${versions.clientVersion} is not older than the control plane`);

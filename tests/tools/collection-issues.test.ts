@@ -198,10 +198,12 @@ describe("getCollectionIssues on an unreadable bug-report.log", () => {
     tempDir = await mkdtemp(join(tmpdir(), "collection-issues-unreadable-"));
     const archiveDir = join(tempDir, "bug-report");
     await createMinimalArchive(archiveDir);
-    const store = await BugReportStore.fromDirectory(archiveDir);
+    // bug-report.log is streamed once, at load.
     await chmod(join(archiveDir, "bug-report.log"), 0o000);
+    const store = await BugReportStore.fromDirectory(archiveDir);
     const issues = await getCollectionIssues(store);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toMatch(/^bug-report\.log could not be read: /);
+    expect(store.getCompletenessSignal("bug-report-log").status).toBe("not_evaluated");
   });
 });
