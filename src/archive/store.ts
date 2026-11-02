@@ -169,11 +169,12 @@ function newestTimeIn(path: string | undefined, re: RegExp, limit: number): numb
 
 /**
  * The log lines istioctl wrote in front of a debug endpoint's body: the text before the first
- * line that starts with `{` or `[`. Times inside the JSON body ("time", "ts" fields of the
- * data) are not when the archive was captured.
+ * line that starts with `{` or `[` (not `[<year>-`, a log line with a bracketed timestamp).
+ * Times inside the JSON body ("time", "ts" fields of the data) are not when the archive was
+ * captured.
  */
 function beforeJsonBody(text: string): string {
-  const at = text.search(/^[{[]/m);
+  const at = text.search(/^(?:\{|\[(?!\d{4}-))/m);
   return at === -1 ? text : text.slice(0, at);
 }
 

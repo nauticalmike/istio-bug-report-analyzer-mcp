@@ -87,6 +87,13 @@ describe("BugReportStore.getCaptureTime", () => {
     expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-02T08:00:00Z"), source: "debug" });
   });
 
+  it("reads a bracketed-timestamp log line in front of debug output as a log line, not the JSON start", async () => {
+    const dir = await withoutLogTimes();
+    await writeFile(join(dir, "istio", "istio-system", "istiod-abc", "debug", "syncz"), "[2026-04-02T08:00:00.000Z] info fetching\n[]");
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-02T08:00:00Z"), source: "debug" });
+  });
+
   it("reads only the log lines in front of debug output, not times inside its JSON body", async () => {
     const dir = await withoutLogTimes();
     await writeFile(
