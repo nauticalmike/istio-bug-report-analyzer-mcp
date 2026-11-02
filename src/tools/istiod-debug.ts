@@ -5,13 +5,15 @@ import { renderTextPage } from "./output-budget.js";
 const DEBUG_COLLECTION_RE = /debug|istiod|discovery|status code|podExec|krt/i;
 
 async function missingDataNote(store: BugReportStore): Promise<string> {
-  const related = (await getCollectionIssues(store)).filter((i) => DEBUG_COLLECTION_RE.test(i.message));
+  const related = (await getCollectionIssues(store)).filter(
+    (i) => DEBUG_COLLECTION_RE.test(i.message) || (i.details ?? []).some((d) => DEBUG_COLLECTION_RE.test(d)),
+  );
   if (related.length === 0) return "";
   return [
     "",
     "",
     "bug-report.log reports collection errors that may explain missing debug data:",
-    ...related.slice(0, 5).map((i) => `  - ${i.message}`),
+    ...related.slice(0, 5).flatMap((i) => [`  - ${i.message}`, ...(i.details ?? []).map((d) => `      * ${d}`)]),
   ].join("\n");
 }
 

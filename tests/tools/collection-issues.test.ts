@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { BugReportStore } from "../../src/archive/store.js";
-import { parseCollectionIssues, getCollectionIssues } from "../../src/tools/collection-issues.js";
+import { formatCollectionIssues, parseCollectionIssues, getCollectionIssues } from "../../src/tools/collection-issues.js";
 import { loadBugReport } from "../../src/tools/load.js";
 import { getOverview } from "../../src/tools/overview.js";
 import { getIstiodDebug } from "../../src/tools/istiod-debug.js";
@@ -55,6 +55,80 @@ describe("parseCollectionIssues", () => {
   it("keeps warnings", () => {
     const issues = parseCollectionIssues("2026-10-20T20:23:10.000000Z\twarn\tskipping namespace kube-system\n");
     expect(issues).toEqual([{ level: "warn", message: "skipping namespace kube-system", count: 1 }]);
+  });
+});
+
+// Shape of istioctl's multi-error output: a count header, then one tab-indented bullet per error.
+const MULTI_ERROR_LOG = [
+  "2026-10-20T20:23:09.000000Z\terror\t3 errors occurred:",
+  "\t* failed to fetch /debug/syncz: received unsuccessful status code 404",
+  "\t* failed to fetch /debug/krtz: received unsuccessful status code 404",
+  "\t* the v1alpha3 API is deprecated, use v1",
+  "",
+  "",
+  "Error: 1 error occurred:",
+  "\t* context deadline exceeded",
+  "",
+  "2026-10-20T20:23:10.000000Z\tinfo\tDone.",
+].join("\n");
+
+describe("parseCollectionIssues multi-error details", () => {
+  it("keeps the detail bullets under their 'N errors occurred:' header", () => {
+    const issues = parseCollectionIssues(MULTI_ERROR_LOG);
+    expect(issues).toHaveLength(2);
+    expect(issues[0]).toMatchObject({
+      level: "error",
+      message: "3 errors occurred:",
+      details: [
+        "failed to fetch /debug/syncz: received unsuccessful status code 404",
+        "failed to fetch /debug/krtz: received unsuccessful status code 404",
+        "the v1alpha3 API is deprecated, use v1",
+      ],
+    });
+    expect(issues[1]).toMatchObject({ message: "1 error occurred:", details: ["context deadline exceeded"] });
+  });
+
+  it("treats headers with different details as different issues", () => {
+    const issues = parseCollectionIssues([MULTI_ERROR_LOG, MULTI_ERROR_LOG.replace("deadline exceeded", "canceled")].join("\n"));
+    expect(issues.map((i) => [i.message, i.count])).toEqual([["3 errors occurred:", 2], ["1 error occurred:", 1], ["1 error occurred:", 1]]);
+  });
+
+  it("get_istiod_debug cites a multi-error header by its debug-related details", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "collection-issues-multi-"));
+    try {
+      await createMinimalArchive(dir);
+      await writeFile(join(dir, "bug-report.log"), MULTI_ERROR_LOG);
+      const store = await BugReportStore.fromDirectory(dir);
+      const text = ((await getIstiodDebug(store, { endpoint: "krtz" })).content[0] as { type: "text"; text: string }).text;
+      expect(text).toContain("  - 3 errors occurred:\n      * failed to fetch /debug/syncz: received unsuccessful status code 404");
+      expect(text).not.toContain("context deadline exceeded");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists the details in tool output", () => {
+    const text = formatCollectionIssues(parseCollectionIssues(MULTI_ERROR_LOG)).join("\n");
+    expect(text).toContain("  - [error] 3 errors occurred:\n      * failed to fetch /debug/syncz: received unsuccessful status code 404\n");
+    expect(text).toContain("      * context deadline exceeded");
+  });
+});
+
+describe("parseCollectionIssues port variants", () => {
+  const portForward = (port: number) => `2026-10-20T20:23:09.000000Z\terror\tfailed to port-forward to istio-system/istiod-abc: listen tcp4 127.0.0.1:${port}: bind: address already in use`;
+
+  it("collapses messages that differ only in port numbers and counts the variants", () => {
+    const lines = Array.from({ length: 50 }, (_, i) => portForward(30000 + i));
+    lines.push(portForward(30000));
+    const issues = parseCollectionIssues(lines.join("\n"));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ message: lines[0].replace(/^\S+\terror\t/, ""), count: 51, variants: 50 });
+    expect(formatCollectionIssues(issues)[1]).toMatch(/\(x51, 50 variants differing only in port\)$/);
+  });
+
+  it("keeps messages that differ in more than ports apart", () => {
+    const issues = parseCollectionIssues([portForward(30000), portForward(30001).replace("istiod-abc", "istiod-def")].join("\n"));
+    expect(issues).toHaveLength(2);
   });
 });
 
