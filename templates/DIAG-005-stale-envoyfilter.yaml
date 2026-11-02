@@ -2,12 +2,16 @@ id: DIAG-005
 name: Stale or Orphaned EnvoyFilter
 category: envoyfilter
 severity: warning
+# Ambient too: gateways and waypoints run Envoy, and waypoint EnvoyFilters attach
+# through targetRefs, which are checked against the Services and Gateways in the dump.
 appliesTo:
   - sidecar
   - interop
+  - ambient
 description: >
   One or more EnvoyFilters no longer line up with the mesh: they select no running
-  workload, reference a target that does not exist, match on deprecated Envoy filter
+  workload, reference a target (Service or Gateway in targetRefs, as used for
+  waypoints and gateways) that does not exist, match on deprecated Envoy filter
   names that Istio 1.19+ no longer translates, carry xDS v2 type URLs that current
   Envoy no longer accepts, or are pinned to a proxyVersion that no running proxy has
   (or that is not a valid regular expression, which makes them apply to every proxy).

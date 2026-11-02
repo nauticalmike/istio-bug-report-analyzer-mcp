@@ -96,7 +96,7 @@ The tool extracts actual resource requests from Pod specs when available, fallin
 | `DIAG-002` | Demo profile (istiod at the demo requests plus another demo setting) |
 | `DIAG-003` | istiod Deployments with fewer than 2 replicas (HPA floor or `replicas`) |
 | `DIAG-004` | Sidecar namespaces whose proxies no Sidecar resource scopes (see below) |
-| `DIAG-005` | Stale or orphaned EnvoyFilters |
+| `DIAG-005` | Stale or orphaned EnvoyFilters: selectors matching no pod, `targetRefs` to missing Services or Gateway API Gateways (waypoints, gateways), removed filter names, v2 type URLs, `proxyVersion` matching no running proxy. Runs on sidecar, ambient and interop meshes |
 | `DIAG-006` | Control plane or istioctl outside its support window on the capture date (see [Supported Istio Versions](#supported-istio-versions)) |
 
 **DIAG-004** reports coverage per sidecar namespace: a namespace with no Sidecar resource, or with only workload-scoped ones that leave some sidecars unselected. A selector-less Sidecar in the root namespace covers the whole mesh. It is not evaluated when `cluster/crs` is missing, empty or unparsed (Sidecar resources live there), skips ambient namespaces (a Sidecar resource has no effect on ztunnel-captured pods), and is skipped for meshes under 20 sidecar proxies (`SIDECAR_SCOPE_MIN_SIDECARS`), where unscoped config costs little. When it fires it also names the egress-gateway and waypoint namespaces that a scoped `egress.hosts` must keep, since leaving them out breaks those paths.
