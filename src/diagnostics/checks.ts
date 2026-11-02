@@ -1,5 +1,6 @@
 import { load } from "js-yaml";
 import type { BugReportStore } from "../archive/store.js";
+import { ISTIO_CR_KINDS, type CompletenessSignal } from "../archive/completeness.js";
 import type { IstiodInfo, ParsedResource } from "../types.js";
 
 export interface Issue {
@@ -211,6 +212,63 @@ export interface NotEvaluated {
   notEvaluated: string;
 }
 
+/** Gateway API kinds; istioctl writes them to cluster/crs with the Istio custom resources. */
+const GATEWAY_API_KINDS = new Set([
+  "Gateway", "GatewayClass", "HTTPRoute", "GRPCRoute", "TCPRoute", "TLSRoute", "UDPRoute", "ReferenceGrant", "BackendTLSPolicy",
+]);
+
+/** The cluster dump section that holds a kind: cluster/crs for Istio and Gateway API kinds, else cluster/k8s-resources. */
+export function clusterSectionOf(kind: string): "crs" | "k8s-resources" {
+  return ISTIO_CR_KINDS.has(kind) || GATEWAY_API_KINDS.has(kind) ? "crs" : "k8s-resources";
+}
+
+/**
+ * Why a cluster dump section cannot show that something is absent (or how many there are),
+ * from its completeness signal and, once parsed, its item count; null when it can. Checks
+ * on a missing or empty section would otherwise report "none found" for data never collected.
+ */
+export function clusterSectionGap(store: BugReportStore, section: "crs" | "k8s-resources"): string | null {
+  const file = `cluster/${section}`;
+  const completeness = store.getCompletenessSignal(section);
+  if (completeness.status !== "ok") return completenessReason(completeness);
+  const items = store.getClusterDumpItems(file);
+  if (items === "unparsed") return `not evaluated: ${file} could not be parsed (see the cluster warnings)`;
+  if (items === 0) return `not evaluated: ${file} is empty`;
+  return null;
+}
+
+/**
+ * Why version checks cannot run: no control plane version from the versions file or from
+ * pod image tags (the versions completeness signal says which). Null when one is known.
+ */
+export function versionsGap(store: BugReportStore): string | null {
+  const versions = store.getEffectiveVersions();
+  if (versions?.controlPlaneVersions.some((v) => /^\d+\.\d+/.test(v.version))) return null;
+  return completenessReason(store.getCompletenessSignal("versions"));
+}
+
+/**
+ * A not-evaluated reason that points at a completeness signal: its summary up to the first
+ * ": " or "; " outside parentheses and quotes ("cluster/crs missing"), then the signal id.
+ * run_diagnostics prints the full signal above the findings, so it is not repeated.
+ */
+function completenessReason(signal: CompletenessSignal): string {
+  let depth = 0;
+  let quoted = false;
+  let cut = signal.summary.length;
+  for (let i = 0; i < signal.summary.length; i++) {
+    const c = signal.summary[i];
+    if (c === '"') quoted = !quoted;
+    else if (!quoted && c === "(") depth++;
+    else if (!quoted && c === ")") depth--;
+    else if (!quoted && depth === 0 && (c === ":" || c === ";") && signal.summary[i + 1] === " ") {
+      cut = i;
+      break;
+    }
+  }
+  return `not evaluated: ${signal.summary.slice(0, cut)} (data completeness: ${signal.id})`;
+}
+
 /** The istio-proxy container's role from its args: "proxy sidecar", "proxy router", "proxy waypoint". */
 function proxyRole(p: ParsedResource): string | null {
   const proxy = [...list(p.spec?.containers), ...list(p.spec?.initContainers)].map(obj).find((c) => c?.name === "istio-proxy");
@@ -272,10 +330,9 @@ function egressTargetNamespaces(store: BugReportStore): string[] {
  * left out: a Sidecar resource does nothing for ztunnel-captured pods (IST0167).
  */
 export function sidecarScopeGaps(store: BugReportStore): Issue[] | NotEvaluated {
-  const crs = store.getClusterDumpItems("cluster/crs");
-  if (crs === "missing") return { notEvaluated: "not evaluated: cluster/crs missing from the archive, so Sidecar resources cannot be seen" };
-  if (crs === "unparsed") return { notEvaluated: "not evaluated: cluster/crs could not be parsed (see the cluster warnings)" };
-  if (crs === 0) return { notEvaluated: "not evaluated: cluster/crs is empty, so Sidecar resources cannot be seen" };
+  // Sidecar resources live in cluster/crs.
+  const gap = clusterSectionGap(store, "crs");
+  if (gap) return { notEvaluated: gap };
 
   const rootNamespace = (meshConfig(store)?.rootNamespace as string | undefined) ?? "istio-system";
   const scopes = store.getClusterResources({ kind: "Sidecar", group: ISTIO_NETWORKING });

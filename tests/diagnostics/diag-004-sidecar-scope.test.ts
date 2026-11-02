@@ -37,7 +37,8 @@ describe("DIAG-004 Sidecar scoping coverage", () => {
   it("is not evaluated when cluster/crs is missing (instead of reporting no Sidecar)", async () => {
     const { f, skipped } = await run(sidecars("shop", 30), { "cluster/crs": null });
     expect(f).toBeUndefined();
-    expect(skipped?.reason).toBe("not evaluated: cluster/crs missing from the archive, so Sidecar resources cannot be seen");
+    // The reason points at the crs completeness signal, as for every check on a missing section.
+    expect(skipped?.reason).toBe("not evaluated: cluster/crs missing (data completeness: crs)");
   });
 
   it("is not evaluated when cluster/crs is empty", async () => {

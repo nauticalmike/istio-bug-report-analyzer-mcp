@@ -40,6 +40,6 @@ describe("runDiagnostics", () => {
     const text = ((await runDiagnostics(noCrs, { categories: "config" })).content[0] as { text: string }).text;
     expect(text).not.toContain("DIAG-004: ");
     expect(text).toContain("Not evaluated or skipped:");
-    expect(text).toContain("DIAG-004 (Sidecar Proxies Without Sidecar Scoping): not evaluated: cluster/crs missing from the archive");
+    expect(text).toContain("DIAG-004 (Sidecar Proxies Without Sidecar Scoping): not evaluated: cluster/crs missing (data completeness: crs)");
   });
 });

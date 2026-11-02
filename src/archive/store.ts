@@ -474,6 +474,15 @@ export class BugReportStore {
     return sections;
   }
 
+  /** Archive path of a proxy's config section (see getProxySections), or null when it was not collected. */
+  getProxySectionPath(namespace: string, pod: string, section: string): string | null {
+    const files = this.proxyFiles.get(`${namespace}/${pod}`);
+    const file = section === "config_dump"
+      ? ["config_dump?include_eds", "config_dump"].find((f) => files?.has(f))
+      : PROXY_SECTION_FILES[section];
+    return file && files?.has(file) ? `proxies/${namespace}/${pod}/${file}` : null;
+  }
+
   getIstiodPods(namespace?: string): IstiodInfo[] {
     if (namespace) {
       return this.istiodPods.get(namespace) ?? [];

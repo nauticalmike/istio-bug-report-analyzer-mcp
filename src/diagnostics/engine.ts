@@ -5,7 +5,14 @@ import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } fro
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
+import { MAX_STRING_BYTES } from "../archive/namespace-scan.js";
+import { formatMB } from "../archive/heap-guard.js";
+import { listLogSources } from "../tools/log-sources.js";
+import { scanLogSources } from "../tools/log-scan.js";
 import {
+  clusterSectionGap,
+  clusterSectionOf,
+  versionsGap,
   demoProfileEvidence,
   istiodsByLoad,
   riskyEnvoyFilters,
@@ -61,6 +68,45 @@ function issuesFor(source: Signal["source"], store: BugReportStore, cache: Issue
   return Array.isArray(result) ? result : [];
 }
 
+/**
+ * Why a signal's input data is not in this archive, or null when it can be evaluated.
+ * A check on missing data would otherwise read "none found" (and a not_exists or count
+ * check fire) for data that was never collected. Issue sources that need more than this
+ * (sidecar_scope) return NotEvaluated themselves.
+ */
+function missingInput(source: Signal["source"], store: BugReportStore): string | null {
+  switch (source.type) {
+    case "resource":
+      return clusterSectionGap(store, clusterSectionOf(source.kind));
+    case "version":
+    case "version_skew":
+      return versionsGap(store);
+    case "version_support":
+      // The istioctl client alone can still be judged.
+      return store.getEffectiveVersions()?.clientVersion ? null : versionsGap(store);
+    case "proxy": {
+      const pod = store.getProxyPods()[0];
+      return pod ? tooLargeToRead(store, store.getProxySectionPath(pod.namespace, pod.podName, source.section)) : null;
+    }
+    case "istiod": {
+      const pod = istiodsByLoad(store).find((p) => p.debugEndpoints.has(source.endpoint));
+      return pod ? tooLargeToRead(store, `istio/${pod.namespace}/${pod.podName}/debug/${source.endpoint}`) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/** Proxy and istiod sources read their file whole, which fails past V8's string limit. */
+function tooLargeToRead(store: BugReportStore, path: string | null): string | null {
+  const size = path ? store.getFileSize(path) : null;
+  if (size === null || size <= MAX_STRING_BYTES) return null;
+  return `not evaluated: ${path} is ${formatMB(size)}, over the ${formatMB(MAX_STRING_BYTES)} that can be read as one string`;
+}
+
+/** Matching lines handed to a non-count log check (from the first log that matches). */
+const MAX_LOG_TEXT_LINES = 1000;
+
 export interface NotEvaluatedTemplate {
   templateId: string;
   templateName: string;
@@ -107,19 +153,30 @@ export class DiagnosticEngine {
       if (template.appliesTo && mode && !template.appliesTo.includes(mode)) continue;
 
       const reason = template.signals
-        .map((s) => resultFor(s.source, store, issueCache))
-        .find((r): r is NotEvaluated => !!r && !Array.isArray(r))?.notEvaluated;
+        .map((s) => {
+          const missing = missingInput(s.source, store);
+          if (missing) return missing;
+          const result = resultFor(s.source, store, issueCache);
+          return result && !Array.isArray(result) ? result.notEvaluated : null;
+        })
+        .find((r) => r);
       if (reason) {
         this.notEvaluated.push({ templateId: template.id, templateName: template.name, reason });
         continue;
       }
 
       let allMatch = true;
+      const unread: string[] = [];
       for (const signal of template.signals) {
-        if (!(await this.evaluateSignal(signal, store, issueCache))) {
+        if (!(await this.evaluateSignal(signal, store, issueCache, unread))) {
           allMatch = false;
           break;
         }
+      }
+      // A log that could not be read may hold the match: no finding is not a pass.
+      if (!allMatch && unread.length > 0) {
+        this.notEvaluated.push({ templateId: template.id, templateName: template.name, reason: `not evaluated: ${unread.length} log file(s) could not be read (${unread.slice(0, 3).join("; ")})` });
+        continue;
       }
 
       if (allMatch) {
@@ -142,8 +199,8 @@ export class DiagnosticEngine {
     return findings;
   }
 
-  private async evaluateSignal(signal: Signal, store: BugReportStore, cache: IssueCache): Promise<boolean> {
-    const value = await this.resolveSignalValue(signal.source, store, cache, signal.check.op);
+  private async evaluateSignal(signal: Signal, store: BugReportStore, cache: IssueCache, unread: string[]): Promise<boolean> {
+    const value = await this.resolveSignalValue(signal.source, store, cache, signal.check.op, unread);
     return evaluateCheck(signal.check, value);
   }
 
@@ -152,6 +209,7 @@ export class DiagnosticEngine {
     store: BugReportStore,
     cache: IssueCache,
     op: Signal["check"]["op"],
+    unread: string[],
   ): Promise<unknown> {
     const issues = issuesFor(source, store, cache);
     if (issues) return issues.length > 0 ? issues : null;
@@ -172,26 +230,22 @@ export class DiagnosticEngine {
         return resources.map((r) => getNestedValue(r, source.field));
       }
       case "logs": {
-        // Count checks get every matching file; other checks get the first matching log text.
+        // Streamed line by line (logs reach several GB). Count checks get every matching
+        // log; other checks get the matching lines of the first log that matches.
         const counting = op === "count_gt" || op === "count_lt";
         const re = new RegExp(source.pattern);
-        const files: { label: string; read: () => string | null | Promise<string | null> }[] = [];
-        if (source.component === "proxy" || source.component === "all") {
-          for (const pod of store.getProxyPods()) files.push({ label: `proxies/${pod.namespace}/${pod.podName}`, read: () => pod.logs });
-        }
-        if (source.component === "istiod" || source.component === "all") {
-          for (const pod of store.getIstiodPods()) files.push({ label: `istio/${pod.namespace}/${pod.podName}`, read: () => pod.discoveryLog });
-        }
-        for (const [component, prefix] of [["operator", "operator/"], ["cni", "cni/"]] as const) {
-          if (source.component !== component && source.component !== "all") continue;
-          for (const f of store.getAllFiles().filter((path) => path.startsWith(prefix))) files.push({ label: f, read: () => store.getRawFile(f) });
-        }
         const matched: string[] = [];
-        for (const { label, read } of files) {
-          const content = await read();
-          if (!content || !re.test(content)) continue;
-          if (!counting) return content;
-          matched.push(label);
+        for (const log of listLogSources(store, source.component)) {
+          const lines: string[] = [];
+          const scan = await scanLogSources(store, [log], (_source, line) => {
+            if (!re.test(line)) return;
+            lines.push(line);
+            return !counting && lines.length < MAX_LOG_TEXT_LINES;
+          });
+          unread.push(...scan.failed.map((f) => `${f.path}: ${f.error}`));
+          if (lines.length === 0) continue;
+          if (!counting) return lines.join("\n");
+          matched.push(log.source);
         }
         return matched.length > 0 ? matched : null;
       }
