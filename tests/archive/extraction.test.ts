@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
@@ -98,7 +98,9 @@ describe("ExtractionTracker", () => {
   it("writes a marker with this process's pid into each dir it creates", async () => {
     const tracker = new ExtractionTracker();
     const dir = await tracker.create(parent);
-    expect((await readFile(join(dir, EXTRACT_MARKER_FILE), "utf8")).trim()).toBe(String(process.pid));
+    const lines = (await readFile(join(dir, EXTRACT_MARKER_FILE), "utf8")).trim().split("\n");
+    expect(lines[0]).toBe(String(process.pid));
+    expect(lines).toContain(`host=${hostname()}`);
   });
 
   it("keeps a dir that a second owner still reads after the first releases it", async () => {
@@ -175,6 +177,21 @@ describe("sweepStaleExtractions", () => {
     const live = await dirWith(`${EXTRACT_DIR_PREFIX}self`, `${process.pid}\n`);
     expect(await sweepStaleExtractions(parent)).toEqual([]);
     expect(existsSync(live)).toBe(true);
+  });
+
+  it("leaves a dir made on another host alone even when that pid is not running here", async () => {
+    const other = await dirWith(`${EXTRACT_DIR_PREFIX}other-host`, `${DEAD}\nhost=build-node-7\n`);
+    const same = await dirWith(`${EXTRACT_DIR_PREFIX}same-host`, `${DEAD}\nhost=${hostname()}\n`);
+    expect(await sweepStaleExtractions(parent, isAlive, { hostname: hostname(), bootId: null })).toEqual([same]);
+    expect(existsSync(other)).toBe(true);
+  });
+
+  it("deletes a same-host dir from an earlier boot even when its pid is in use again", async () => {
+    const earlier = await dirWith(`${EXTRACT_DIR_PREFIX}old-boot`, `${process.pid + 1}\nhost=h1\nboot=aaaa\n`);
+    const current = await dirWith(`${EXTRACT_DIR_PREFIX}this-boot`, `${process.pid + 1}\nhost=h1\nboot=bbbb\n`);
+    const alive = () => true;
+    expect(await sweepStaleExtractions(parent, alive, { hostname: "h1", bootId: "bbbb" })).toEqual([earlier]);
+    expect(existsSync(current)).toBe(true);
   });
 
   it("returns nothing for a missing parent", async () => {

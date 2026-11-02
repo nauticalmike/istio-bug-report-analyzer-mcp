@@ -1,13 +1,15 @@
 // Only node: imports, so the exit-cleanup path can be exercised in a child process from the .ts source.
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { hostname } from "node:os";
 import { lstat, mkdtemp, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 export const EXTRACT_DIR_PREFIX = "bug-report-extract-";
 /**
- * Written into every extraction dir with the creating process's pid, so a later server can
- * tell its own leftovers (from a crash or SIGKILL) from anything else named like them.
- * The archive index skips it.
+ * Written into every extraction dir with the creating process's pid, host name and (on Linux)
+ * boot id, so a later server can tell its own leftovers (from a crash or SIGKILL) from
+ * anything else named like them, and a pid of another host (a shared /tmp) or of an earlier
+ * boot from a live process here. The archive index skips it.
  */
 export const EXTRACT_MARKER_FILE = ".istio-bug-report-analyzer-owner";
 
@@ -126,7 +128,7 @@ export class ExtractionTracker {
     const dir = await mkdtemp(join(parent, EXTRACT_DIR_PREFIX));
     this.owned.add(dir);
     try {
-      await writeFile(join(dir, EXTRACT_MARKER_FILE), `${process.pid}\n`);
+      await writeFile(join(dir, EXTRACT_MARKER_FILE), markerText(process.pid, thisHost()));
     } catch (e) {
       await this.remove(dir);
       throw e;
@@ -195,6 +197,32 @@ export class ExtractionTracker {
   }
 }
 
+/** The machine a marker was written on: host name and, where the kernel gives one cheaply, boot id. */
+export interface HostIdentity {
+  hostname: string;
+  bootId: string | null;
+}
+
+let cachedHost: HostIdentity | undefined;
+
+/** This machine's identity (Linux boot id from /proc; null elsewhere, where it costs a subprocess). */
+export function thisHost(): HostIdentity {
+  if (!cachedHost) {
+    let bootId: string | null = null;
+    try {
+      bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
+    } catch {
+      // Not Linux, or no /proc.
+    }
+    cachedHost = { hostname: hostname(), bootId };
+  }
+  return cachedHost;
+}
+
+function markerText(pid: number, host: HostIdentity): string {
+  return [String(pid), `host=${host.hostname}`, ...(host.bootId ? [`boot=${host.bootId}`] : []), ""].join("\n");
+}
+
 /** Whether a process with this pid exists (EPERM: it does, owned by another user). */
 function processAlive(pid: number): boolean {
   try {
@@ -208,10 +236,16 @@ function processAlive(pid: number): boolean {
 /**
  * Deletes `bug-report-extract-*` directories in `parent` left by a server that died
  * without cleaning up (SIGKILL, crash). Only real directories (not symlinks) that hold our
- * marker with a valid pid, where that process is gone, are deleted; anything else,
- * including a directory without the marker, is left alone. Returns the deleted paths.
+ * marker with a valid pid, written on this host, where that process is gone (or the marker is
+ * from an earlier boot) are deleted; anything else, including a directory without the marker
+ * or one another host wrote, is left alone. Markers without a host line (older servers) are
+ * judged by pid alone. Returns the deleted paths.
  */
-export async function sweepStaleExtractions(parent: string, isAlive: (pid: number) => boolean = processAlive): Promise<string[]> {
+export async function sweepStaleExtractions(
+  parent: string,
+  isAlive: (pid: number) => boolean = processAlive,
+  self: HostIdentity = thisHost(),
+): Promise<string[]> {
   const names = await readdir(parent).catch(() => [] as string[]);
   const removed: string[] = [];
   for (const name of names) {
@@ -221,10 +255,17 @@ export async function sweepStaleExtractions(parent: string, isAlive: (pid: numbe
       if (!(await lstat(dir)).isDirectory()) continue;
       const marker = join(dir, EXTRACT_MARKER_FILE);
       if (!(await lstat(marker)).isFile()) continue;
-      const text = (await readFile(marker, "utf8")).trim();
-      if (!/^\d+$/.test(text)) continue;
-      const pid = Number(text);
-      if (pid === process.pid || isAlive(pid)) continue;
+      const [pidLine, ...fields] = (await readFile(marker, "utf8")).trim().split("\n");
+      if (!/^\d+$/.test(pidLine)) continue;
+      const field = (key: string) => fields.find((f) => f.startsWith(`${key}=`))?.slice(key.length + 1);
+      // A pid means nothing on another host (a /tmp shared across machines or containers).
+      const host = field("host");
+      if (host !== undefined && host !== self.hostname) continue;
+      // Written in an earlier boot: its process is gone even if the pid is in use again.
+      const boot = field("boot");
+      const earlierBoot = boot !== undefined && self.bootId !== null && boot !== self.bootId;
+      const pid = Number(pidLine);
+      if (!earlierBoot && (pid === process.pid || isAlive(pid))) continue;
       await rm(dir, { recursive: true, force: true });
       removed.push(dir);
     } catch {
