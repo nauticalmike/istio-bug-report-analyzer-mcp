@@ -66,7 +66,7 @@ export async function getOverview(store: BugReportStore) {
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
   ];
   const issueLines = formatCollectionIssues(await getCollectionIssues(store), getCollectionOverflow(store));
-  lines.push("", ...formatCompleteness(store.getCompleteness(), { collectionIssuesListed: issueLines.length > 0 }));
+  lines.push("", ...formatCompleteness(store.getCompleteness()));
   const warnings = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
   if (warnings.length > 0) lines.push("", ...warnings);
   if (issueLines.length > 0) lines.push("", ...issueLines);

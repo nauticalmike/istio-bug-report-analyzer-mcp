@@ -64,21 +64,30 @@ Call the tool again with that `offset` to get the next page. `get_raw_file` read
 
 ### Data completeness
 
-A bug report can be missing data without saying so: a section that failed to collect looks the same as a cluster with nothing in it. `load_bug_report`, `get_overview` and the top of `run_diagnostics` therefore give a verdict, `complete` only when every check below passes:
+A bug report can be missing data without saying so: a section that failed to collect looks the same as a cluster with nothing in it. `load_bug_report`, `get_overview` and the top of `run_diagnostics` therefore print the same verdict, in one of three levels:
 
-| Check | Flags |
-|-------|-------|
-| `versions` | `versions` missing, no control plane version, or istioctl could not retrieve them (says so when the versions were derived from pod image tags instead) |
-| `k8s-resources` | `cluster/k8s-resources` missing or empty |
-| `crs` | `cluster/crs` missing, or empty while `istioctl analyze` lists Istio resources |
-| `istiod-debug` | no istiod pods or debug endpoints, or debug output only from istiod pods that serve no proxies |
-| `proxy-config-dump` | proxy dirs without a `config_dump` |
-| `ztunnel-cni-logs` | ztunnel or CNI pods (dirs, or pods in the cluster dump) without logs |
-| `bug-report-log` | auth (Unauthorized/Forbidden), 404 or timeout errors anywhere in `bug-report.log` |
-| `istioctl-client` | istioctl older than the control plane (the same comparison as the `get_versions` warning) |
-| `stale-proxy-dirs` | proxy dirs whose pod is not in the cluster dump (pods replaced during a long collection); the collection span from file times is shown when it is long |
+- `complete`: no check found a gap.
+- `complete with minor gaps`: only minor gaps (some pods, istiods or items missing). Findings hold; they may miss only what is named.
+- `INCOMPLETE`: at least one major gap. Findings that rely on the data named may be missing or wrong.
 
-A check that needs data the archive does not have is reported as `not evaluated`, which also keeps the verdict from saying `complete`. `get_overview` also notes proxy dirs with no live pod next to the proxy count. The checks read the file index and small files, a streaming scan of the pod dumps for pod names, and the collection issues of `bug-report.log`, which is streamed once at load for both; an unusable `versions` file also has the pod dump parsed for image tags. In `load_bug_report` and `get_overview` the collection errors are listed once, under "Collection issues".
+Each check is `ok`, a gap (`[missing]` when major, `[minor]` when minor) or `[not evaluated]` when the data it needs is absent. A check that is not evaluated is listed but does not set the verdict.
+
+| Check | Major gap | Minor gap |
+|-------|-----------|-----------|
+| `versions` | `versions` missing or unusable and no version from pod image tags either | versions derived from pod image tags, or istioctl could not read all of them |
+| `k8s-resources` | `cluster/k8s-resources` missing or empty | |
+| `crs` | `cluster/crs` missing, or empty while `istioctl analyze` lists Istio resources | |
+| `istiod-debug` | no istiod pods or debug endpoints, or debug output only from istiod pods that serve no proxies | some istiod pods without debug output |
+| `proxy-config-dump` | 10% or more of the live proxy dirs have no `config_dump` | fewer than 10% |
+| `ztunnel-cni-logs` | 25% or more of the live ztunnel / istio-cni pods in the cluster dump have no logs collected | fewer than 25% (a collected dir with an empty log is only noted: istioctl skips logs with no lines in its time window) |
+| `bug-report-log` | auth errors (Unauthorized/Forbidden) on a list or watch, or no istiod found | per-pod port-forward, exec, timeout or 404 errors |
+| `istioctl-client` | istioctl two or more minors older than the control plane | one minor older |
+| `stale-proxy-dirs` | | proxy dirs whose pod is not in the cluster dump (pods replaced during a long collection); the collection span from file times is shown when it is long |
+| `proxy-coverage` | fewer than half of the injected pods in the pod dump have a proxy dir | |
+
+The pod comparisons (`stale-proxy-dirs`, `ztunnel-cni-logs`, `proxy-coverage`) use one streaming scan of the pod dumps (`cluster/k8s-resources`, `cluster/pods`) that reads each item's kind, name, namespace, phase and istio-proxy container, so the verdict is the same before and after another tool parses the dumps. Without `cluster/k8s-resources`, `cluster/pods` holds only the Istio namespace: proxy dirs in other namespaces are then not compared (neither live nor stale), DIAG-004 counts their sidecars from the proxy dirs, and versions read from pod image tags name the namespaces they cover. Stale dirs are counted only by `stale-proxy-dirs`. The other checks read the file index, small files and the collection issues of `bug-report.log`, which is streamed once at load; an unusable `versions` file also has the pod dump parsed for image tags. The collection errors are listed once, under "Collection issues", after the verdict.
+
+The structured verdict is `store.getCompleteness()` (`verdict`: `complete`, `complete_with_minor_gaps` or `incomplete`; `signals` with `id`, `status`, `summary`, `details` and `minor` on a minor gap) and `store.getCompletenessSignal(id)`.
 
 ## Usage with Claude Code
 

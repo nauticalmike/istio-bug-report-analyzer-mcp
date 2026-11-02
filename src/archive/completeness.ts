@@ -6,9 +6,10 @@ import { MAX_COLLECTION_ISSUES } from "../tools/collection-issues.js";
 /**
  * Data-completeness signals: what an archive is missing, so that output built on the
  * missing part is not read as "nothing is wrong". Each signal is computed from the file
- * index, small bounded reads and the load-time scan of bug-report.log, so it is cheap
- * enough to run at load. Only an unusable versions file costs more: the pod dump is then
- * parsed for image tags (the same fallback get_overview and get_versions use).
+ * index, small bounded reads, the load-time scan of bug-report.log and the pod inventory (a
+ * streaming item scan of the pod dumps), so it is cheap enough to run at load. Only an
+ * unusable versions file costs more: the pod dump is then parsed for image tags (the same
+ * fallback get_overview and get_versions use). A gap is major or minor (see verdictOf).
  */
 export type CompletenessSignalId =
   | "versions"
@@ -19,7 +20,8 @@ export type CompletenessSignalId =
   | "ztunnel-cni-logs"
   | "bug-report-log"
   | "istioctl-client"
-  | "stale-proxy-dirs";
+  | "stale-proxy-dirs"
+  | "proxy-coverage";
 
 /** ok: checked, nothing missing. gap: data is missing or unreliable. not_evaluated: the data the check needs is absent. */
 export type CompletenessStatus = "ok" | "gap" | "not_evaluated";
@@ -29,11 +31,21 @@ export interface CompletenessSignal {
   status: CompletenessStatus;
   summary: string;
   details: string[];
+  /**
+   * Set on a gap that leaves the rest of the archive usable (some pods or istiods missing,
+   * versions from image tags, per-pod collection errors); unset on a gap that is major.
+   */
+  minor?: boolean;
 }
 
+/**
+ * complete: no gap. complete_with_minor_gaps: only minor gaps. incomplete: a major gap.
+ * Signals that could not be evaluated are listed but do not set the verdict.
+ */
+export type CompletenessVerdict = "complete" | "complete_with_minor_gaps" | "incomplete";
+
 export interface Completeness {
-  /** "complete" only when every signal is ok. */
-  verdict: "complete" | "incomplete";
+  verdict: CompletenessVerdict;
   signals: CompletenessSignal[];
 }
 
@@ -54,6 +66,12 @@ const MAX_EXAMPLES = 5;
 const IDLE_SYNCZ_MAX_BYTES = 4096;
 // A cluster dump this small with no object in it is empty (e.g. an empty List).
 const EMPTY_DUMP_PROBE_BYTES = 4096;
+// Major-gap thresholds: below them a gap is minor.
+const MAJOR_CONFIG_DUMP_SHARE = 0.1;
+const MAJOR_DAEMON_LOG_SHARE = 0.25;
+const MAJOR_CLIENT_MINORS_BEHIND = 2;
+// Proxy coverage: below this share of injected pods with a proxy dir, the proxy data is a sample.
+const MIN_PROXY_COVERAGE = 0.5;
 // Collection spans shorter than this are normal and not reported.
 const MIN_REPORTED_SPAN_MS = 10 * 60 * 1000;
 
@@ -64,12 +82,15 @@ export const ISTIO_CR_KINDS = new Set([
 ]);
 
 const LOG_PROBLEMS: { kind: string; re: RegExp }[] = [
+  { kind: "no istiod", re: /\bno istiod\b|could not find (?:an? |any )?istiod|istiod (?:pods? )?not found|failed to (?:find|get) istiod/i },
   { kind: "auth", re: /\b(Unauthorized|Forbidden)\b|\b40[13]\b/i },
   { kind: "404", re: /\b404\b|could not find the requested resource/i },
   { kind: "timeout", re: /\btimed? ?out\b|\btimeout\b|deadline exceeded/i },
 ];
 
 // URLs and request paths with a query, which carry parameters like ?timeout=10m0s that are not errors.
+// An auth error on a list or watch loses a whole resource type, not one pod's data.
+const LIST_WATCH_RE = /\b(?:list|watch)(?:ing|ed)?\b/i;
 const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+|(?<![^\s"'(])\/[^\s"'<>]*\?[^\s"'<>]*/gi;
 
 export const POD_DUMP_FILES = ["cluster/k8s-resources", "cluster/pods"];
@@ -80,6 +101,19 @@ const signal = (id: CompletenessSignalId, status: CompletenessStatus, summary: s
   summary,
   details,
 });
+
+const minorGap = (id: CompletenessSignalId, summary: string, details: string[] = []): CompletenessSignal => ({ ...signal(id, "gap", summary, details), minor: true });
+
+/** A gap that is minor when `minor` holds, else major. */
+const gapOf = (minor: boolean, id: CompletenessSignalId, summary: string, details: string[] = []): CompletenessSignal =>
+  minor ? minorGap(id, summary, details) : signal(id, "gap", summary, details);
+
+/** The verdict of a set of signals: the worst gap; not-evaluated signals do not count. */
+export function verdictOf(signals: CompletenessSignal[]): CompletenessVerdict {
+  const gaps = signals.filter((s) => s.status === "gap");
+  if (gaps.some((s) => !s.minor)) return "incomplete";
+  return gaps.length > 0 ? "complete_with_minor_gaps" : "complete";
+}
 
 function examples(items: string[]): string[] {
   const shown = items.slice(0, MAX_EXAMPLES);
@@ -102,8 +136,9 @@ export function computeCompleteness(store: BugReportStore, pods: PodInventory): 
     bugReportLogSignal(store),
     clientSignal(store),
     staleSignal(store, stale),
+    proxyCoverageSignal(store, pods),
   ];
-  return { verdict: signals.every((s) => s.status === "ok") ? "complete" : "incomplete", signals };
+  return { verdict: verdictOf(signals), signals };
 }
 
 function versionsSignal(store: BugReportStore): CompletenessSignal {
@@ -118,10 +153,10 @@ function versionsSignal(store: BugReportStore): CompletenessSignal {
     // The same image-tag fallback get_overview, get_versions and the version diagnostics use.
     const from = store.getEffectiveVersions()?.fromImages;
     const derived = [from?.controlPlane ? "control plane" : "", from?.proxies ? "data plane" : ""].filter(Boolean);
-    if (derived.length > 0) return signal("versions", "gap", `${problem}; versions derived from pod image tags (${derived.join(", ")})`);
+    if (derived.length > 0) return minorGap("versions", `${problem}; versions derived from pod image tags (${derived.join(", ")})`);
     return signal("versions", "gap", `${problem}: Istio versions are unknown`);
   }
-  if (unable) return signal("versions", "gap", `istioctl could not read all versions ("${unable[0].trim().slice(0, 120)}")`);
+  if (unable) return minorGap("versions", `istioctl could not read all versions ("${unable[0].trim().slice(0, 120)}")`);
   return signal("versions", "ok", "versions recorded");
 }
 
@@ -180,7 +215,8 @@ function istiodDebugSignal(store: BugReportStore): CompletenessSignal {
   if (store.getProxyPods().length > 0 && unknown === 0 && idle.length === withDebug.length) {
     return signal("istiod-debug", "gap", `debug output is only from istiod pods that serve no proxies (${idle.join(", ")}): the serving revision's debug data is missing`, details);
   }
-  return signal("istiod-debug", "ok", `debug endpoints from ${plural(withDebug.length, "istiod pod")}`, details);
+  if (without.length > 0) return minorGap("istiod-debug", `${without.length} of ${plural(pods.length, "istiod pod")} have no debug output`, details);
+  return signal("istiod-debug", "ok", `debug endpoints from ${plural(withDebug.length, "istiod pod")}`);
 }
 
 /** Proxy dirs whose pod is still in the cluster dump (or cannot be checked): stale dirs are counted once, by staleSignal. */
@@ -195,7 +231,8 @@ function configDumpSignal(store: BugReportStore, stale: StaleProxyDirs): Complet
     .filter((p) => !(store.getProxySections(p.namespace, p.podName) ?? []).includes("config_dump"))
     .map((p) => `${p.namespace}/${p.podName}`);
   if (missing.length === 0) return signal("proxy-config-dump", "ok", `every live proxy dir (${proxies.length}) has a config_dump`);
-  return signal("proxy-config-dump", "gap", `${missing.length} of ${plural(proxies.length, "live proxy dir")} have no config_dump`, examples(missing));
+  const minor = missing.length < MAJOR_CONFIG_DUMP_SHARE * proxies.length;
+  return gapOf(minor, "proxy-config-dump", `${missing.length} of ${plural(proxies.length, "live proxy dir")} have no config_dump`, examples(missing));
 }
 
 /**
@@ -228,7 +265,8 @@ function daemonLogsSignal(store: BugReportStore, pods: PodInventory, stale: Stal
     ? [`${plural(emptyLogs.length, "collected dir")} with an empty or no log (istioctl skips logs with no lines in its time window): ${examples(emptyLogs).join(", ")}`]
     : [];
   if (notCollected.length > 0) {
-    return signal("ztunnel-cni-logs", "gap", `${notCollected.length} of ${plural(live.length, "ztunnel/CNI pod")} in the cluster dump have no logs collected`, [...examples(notCollected), ...emptyNote]);
+    const minor = notCollected.length < MAJOR_DAEMON_LOG_SHARE * live.length;
+    return gapOf(minor, "ztunnel-cni-logs", `${notCollected.length} of ${plural(live.length, "ztunnel/CNI pod")} in the cluster dump have no logs collected`, [...examples(notCollected), ...emptyNote]);
   }
   if (ztunnelDirs.size + cniDirs.size + live.length === 0) return signal("ztunnel-cni-logs", "ok", "no ztunnel or CNI pods");
   return signal("ztunnel-cni-logs", "ok", `logs for ${ztunnelDirs.size} ztunnel and ${cniDirs.size} CNI pods`, emptyNote);
@@ -243,11 +281,13 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
   // The collection issues are the log's error and warning lines, deduplicated; the bullets
   // under an "N errors occurred:" header are the individual errors.
   const hits = new Map<string, { count: number; example: string }>();
+  let major = false;
   for (const issue of scan.issues) {
     for (const text of [issue.message, ...(issue.details ?? [])]) {
       const bare = text.replace(URL_RE, "<URL>");
       const kind = LOG_PROBLEMS.find(({ re }) => re.test(bare))?.kind;
       if (!kind) continue;
+      if (kind === "no istiod" || (kind === "auth" && LIST_WATCH_RE.test(bare))) major = true;
       // A bullet seen N times under one header ends in " (xN)".
       const count = issue.count * Number(/ \(x(\d+)\)$/.exec(text)?.[1] ?? 1);
       const hit = hits.get(kind);
@@ -259,15 +299,35 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
   const overflowNote = `${overflow} line(s) past the first ${MAX_COLLECTION_ISSUES} distinct issues were not checked`;
   if (hits.size > 0) {
     const kinds = [...hits].map(([kind, h]) => `${kind} x${h.count}`).join(", ");
-    return signal(
+    // Per-pod port-forward, exec, timeout and 404 errors lose that pod's data only.
+    return gapOf(
+      !major,
       "bug-report-log",
-      "gap",
-      `${file} has collection errors (${kinds}): some data may not have been fetched`,
+      `${file} has collection errors (${kinds}): ${major ? "whole resource types or istiod may not have been fetched" : "some per-pod data may not have been fetched"}`,
       [...[...hits].map(([kind, h]) => `${kind}: ${h.example}`), ...(overflow > 0 ? [overflowNote] : [])],
     );
   }
   if (overflow > 0) return signal("bug-report-log", "not_evaluated", `${file}: no auth/404/timeout errors in the issues kept, but ${overflowNote}`);
   return signal("bug-report-log", "ok", `no auth/404/timeout errors in ${file}`);
+}
+
+/**
+ * Injected pods of the pod dump (live, with an istio-proxy that is not ztunnel's) that have a
+ * proxy dir. Below MIN_PROXY_COVERAGE the proxy data is a sample of the mesh, not the mesh
+ * (e.g. a capped or namespace-filtered collection), and proxy-based findings undercount.
+ */
+function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): CompletenessSignal {
+  if (!pods.available) return signal("proxy-coverage", "not_evaluated", "no pod list in the cluster dump to compare proxy dirs against");
+  const injected = [...pods.pods.values()].filter((p) => p.injected && isLive(p));
+  if (injected.length === 0) return signal("proxy-coverage", "ok", "no injected pods in the pod dump");
+  const dirs = new Set(store.getProxyPods().map((p) => podKey(p.namespace, p.podName)));
+  const without = injected.filter((p) => !dirs.has(podKey(p.namespace, p.name))).map((p) => podKey(p.namespace, p.name));
+  const covered = injected.length - without.length;
+  const summary = `${covered} of ${plural(injected.length, "injected pod")} in the pod dump have a proxy dir`;
+  if (covered < MIN_PROXY_COVERAGE * injected.length) {
+    return signal("proxy-coverage", "gap", `${summary}: proxy configs and logs cover a sample of the mesh, so proxy findings undercount`, examples(without));
+  }
+  return signal("proxy-coverage", "ok", summary, without.length > 0 ? [`without a proxy dir: ${examples(without).join(", ")}`] : []);
 }
 
 function clientSignal(store: BugReportStore): CompletenessSignal {
@@ -278,9 +338,12 @@ function clientSignal(store: BugReportStore): CompletenessSignal {
   }
   const behind = clientBehindControlPlane(versions);
   if (behind) {
-    return signal(
+    const client = parseMinor(behind.client)!;
+    const cp = parseMinor(behind.controlPlane)!;
+    const minors = client.major === cp.major ? cp.minor - client.minor : Infinity;
+    return gapOf(
+      minors < MAJOR_CLIENT_MINORS_BEHIND,
       "istioctl-client",
-      "gap",
       `istioctl ${behind.client} is older than the control plane (${behind.controlPlane}): it may not collect newer data; re-collect with a matching istioctl`,
     );
   }
@@ -315,9 +378,8 @@ function staleSignal(store: BugReportStore, dirs: StaleProxyDirs): CompletenessS
   const span = collectionSpanMs(store);
   const spanNote = span >= MIN_REPORTED_SPAN_MS ? [`files were written over ~${(span / 3.6e6).toFixed(1)} h (from file times), so pods may have been replaced during collection`] : [];
   if (stale.length === 0) return signal("stale-proxy-dirs", "ok", `every compared proxy dir (${compared}) has a live pod`, [...unknownNote, ...spanNote]);
-  return signal(
+  return minorGap(
     "stale-proxy-dirs",
-    "gap",
     `${stale.length} of ${plural(compared, "proxy dir")} have no live pod in the cluster dump: proxy counts include pods that no longer exist`,
     [...spanNote, ...examples(stale), ...unknownNote],
   );
@@ -335,24 +397,45 @@ function collectionSpanMs(store: BugReportStore): number {
   return max > min ? max - min : 0;
 }
 
-const LABELS: Record<CompletenessStatus, string> = { ok: "ok", gap: "missing", not_evaluated: "not evaluated" };
+/** The details of these signals point at the "Collection issues" list instead of repeating its lines. */
+const LISTED_ELSEWHERE: Partial<Record<CompletenessSignalId, (detail: string) => boolean>> = {
+  "bug-report-log": (d) => LOG_PROBLEMS.some(({ kind }) => d.startsWith(`${kind}: `)),
+};
 
-export interface FormatOptions {
-  /** The caller also prints the collection issues, so the bug-report-log examples are not repeated. */
-  collectionIssuesListed?: boolean;
+function label(s: CompletenessSignal): string {
+  if (s.status === "not_evaluated") return "not evaluated";
+  return s.minor ? "minor" : "missing";
 }
 
-/** One verdict line, then one line per signal that is not ok (with its details indented). */
-export function formatCompleteness(c: Completeness, opts: FormatOptions = {}): string[] {
-  const gaps = c.signals.filter((s) => s.status === "gap");
+/**
+ * One verdict line, then one line per signal that is not ok (major gaps, minor gaps, then
+ * not evaluated) with its details indented. The text depends only on the verdict, so every
+ * tool that prints it prints the same lines; bug-report.log examples are left to the
+ * "Collection issues" list each of those tools prints after it.
+ */
+export function formatCompleteness(c: Completeness): string[] {
+  const major = c.signals.filter((s) => s.status === "gap" && !s.minor);
+  const minor = c.signals.filter((s) => s.status === "gap" && s.minor);
   const unevaluated = c.signals.filter((s) => s.status === "not_evaluated");
-  if (c.verdict === "complete") return [`Data completeness: complete (${c.signals.length} checks passed)`];
-  const counts = [gaps.length > 0 ? plural(gaps.length, "gap") : "", unevaluated.length > 0 ? `${unevaluated.length} not evaluated` : ""].filter(Boolean);
-  const lines = [`Data completeness: INCOMPLETE (${counts.join(", ")}). Findings that rely on the data below may be missing or wrong:`];
-  for (const s of [...gaps, ...unevaluated]) {
-    lines.push(`  - [${LABELS[s.status]}] ${s.id}: ${s.summary}`);
-    const details = opts.collectionIssuesListed && s.id === "bug-report-log" && s.details.length > 0 ? ["(listed under Collection issues below)"] : s.details;
-    for (const d of details) lines.push(`      ${d}`);
+  const notEvaluated = unevaluated.length > 0 ? `${unevaluated.length} not evaluated` : "";
+  const counts = (...parts: string[]) => parts.filter(Boolean).join(", ");
+  let head: string;
+  if (c.verdict === "incomplete") {
+    head = `Data completeness: INCOMPLETE (${counts(plural(major.length, "major gap"), minor.length > 0 ? plural(minor.length, "minor gap") : "", notEvaluated)}). Findings that rely on the data below may be missing or wrong:`;
+  } else if (c.verdict === "complete_with_minor_gaps") {
+    head = `Data completeness: complete with minor gaps (${counts(plural(minor.length, "minor gap"), notEvaluated)}). Findings hold; they may miss only the pods or items named below:`;
+  } else if (unevaluated.length > 0) {
+    head = `Data completeness: complete (${c.signals.length - unevaluated.length} checks passed, ${notEvaluated}):`;
+  } else {
+    return [`Data completeness: complete (${c.signals.length} checks passed)`];
+  }
+  const lines = [head];
+  for (const s of [...major, ...minor, ...unevaluated]) {
+    lines.push(`  - [${label(s)}] ${s.id}: ${s.summary}`);
+    const elsewhere = LISTED_ELSEWHERE[s.id];
+    const listed = elsewhere ? s.details.filter(elsewhere) : [];
+    for (const d of s.details) if (!listed.includes(d)) lines.push(`      ${d}`);
+    if (listed.length > 0) lines.push("      (examples under Collection issues below)");
   }
   return lines;
 }

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { DiagnosticEngine, type NotEvaluatedTemplate } from "../diagnostics/engine.js";
 import type { BugReportStore } from "../archive/store.js";
 import { formatCompleteness } from "../archive/completeness.js";
+import { formatCollectionIssues, getCollectionIssues, getCollectionOverflow } from "./collection-issues.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, "..", "..", "templates");
@@ -18,8 +19,11 @@ export async function runDiagnostics(
   const modeInfo = store.detectDataPlaneMode();
   const findings = await engine.run(store, categories, modeInfo.mode);
   const skipped = notEvaluatedLines(engine.getNotEvaluated());
-  // First, so "no issues" is never read without knowing what data the checks had.
+  // First, so "no issues" is never read without knowing what data the checks had. The same
+  // lines as load_bug_report and get_overview, whose Collection issues list is also printed.
   const completeness = [...formatCompleteness(store.getCompleteness()), ""];
+  const issueLines = formatCollectionIssues(await getCollectionIssues(store), getCollectionOverflow(store));
+  if (issueLines.length > 0) skipped.push("", ...issueLines);
 
   if (findings.length === 0) {
     return {

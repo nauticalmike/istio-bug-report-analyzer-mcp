@@ -30,7 +30,7 @@ If loading an existing archive:
 
 Confirm the archive loaded successfully and show the overview.
 
-**Data completeness:** `load_bug_report`, `get_overview` and `run_diagnostics` start with a `Data completeness:` verdict. When it is `INCOMPLETE`, list the missing or unevaluated data in the assessment, do not report "no issues" for areas that rely on it, and recommend re-collecting (for example with an istioctl matching the control plane) when the gaps matter.
+**Data completeness:** `load_bug_report`, `get_overview` and `run_diagnostics` start with the same `Data completeness:` verdict: `complete`, `complete with minor gaps` or `INCOMPLETE`. When it is `INCOMPLETE`, list the `[missing]` data in the assessment, do not report "no issues" for areas that rely on it, and recommend re-collecting (for example with an istioctl matching the control plane) when the gaps matter. With minor gaps, mention the `[minor]` items (some pods or istiods not collected) without discounting the findings. `[not evaluated]` checks are listed but do not change the verdict.
 
 ## Phase 2: Initial Assessment
 

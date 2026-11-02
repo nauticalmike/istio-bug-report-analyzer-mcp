@@ -117,12 +117,45 @@ describe("completeness verdict in tool output", () => {
       expect(text).toContain("Data Plane: 1.31.2 (1 proxies) [from pod image tags; pod dump covers only namespaces: istio-system]");
     });
 
-    it("run_diagnostics keeps the collection-error examples, as it has no Collection issues list", async () => {
+    it("run_diagnostics lists the collection errors under Collection issues, like load and overview", async () => {
       await writeFile(join(dir, "bug-report.log"), collectionLog);
       const text = textOf(await runDiagnostics(await BugReportStore.fromDirectory(dir), {}));
-      expect(text).not.toContain("Collection issues (");
-      expect(text).toContain("auth: failed to list pods: Forbidden");
+      expect(text).toContain("Collection issues (2) reported in bug-report.log:");
+      expect(count(text, "failed to list pods: Forbidden")).toBe(1);
     });
+
+    const verdictOf = (text: string) => {
+      const lines = text.split("\n");
+      const start = lines.findIndex((l) => l.startsWith("Data completeness:"));
+      const end = lines.findIndex((l, i) => i > start && !l.startsWith("  "));
+      return lines.slice(start, end === -1 ? undefined : end).join("\n");
+    };
+
+    for (const [variant, setup] of [
+      ["collection errors and image-tag versions", async () => { await writeFile(join(dir, "bug-report.log"), collectionLog); await imageVersions(); }],
+      ["a stale proxy dir found only after the dump is parsed", async () => {
+        // An Endpoints targetRef names the old pod: a name scan would have taken it as live.
+        await writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: [
+          { apiVersion: "v1", kind: "Endpoints", metadata: { name: "shop", namespace: "default" }, subsets: [{ addresses: [{ ip: "10.0.0.9", targetRef: { kind: "Pod", name: "old-pod-zzz99", namespace: "default" } }] }] },
+        ] }));
+        const stale = join(dir, "proxies", "default", "old-pod-zzz99");
+        await mkdir(stale, { recursive: true });
+        await writeFile(join(stale, "config_dump?include_eds"), "{}");
+      }],
+      ["missing cluster/crs", async () => { await unlink(join(dir, "cluster", "crs")); }],
+    ] as const) {
+      it(`prints the same verdict in load_bug_report, get_overview and run_diagnostics (${variant})`, async () => {
+        await setup();
+        const load = verdictOf(await loadText());
+        const store = await BugReportStore.fromDirectory(dir);
+        const overview = verdictOf(textOf(await getOverview(store)));
+        // run_diagnostics parses the cluster dump; the verdict must not change with it.
+        const diagnostics = verdictOf(textOf(await runDiagnostics(store, {})));
+        expect(store.isClusterResourcesParsed()).toBe(true);
+        expect(overview).toBe(load);
+        expect(diagnostics).toBe(load);
+      });
+    }
 
     it("says versions are unknown in the verdict and the version lines alike when nothing gives a version", async () => {
       await unlink(join(dir, "versions"));

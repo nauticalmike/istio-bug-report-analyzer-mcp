@@ -327,3 +327,150 @@ describe("data completeness verdict", () => {
     expect(s.summary).toMatch(/istioctl 1\.29\.0 is older than the control plane \(1\.31\)/);
   });
 });
+
+describe("three-level completeness verdict", () => {
+  let tempDir: string;
+  let dir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "completeness-levels-"));
+    dir = join(tempDir, "bug-report");
+    await createMinimalArchive(dir);
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const load = () => BugReportStore.fromDirectory(dir);
+  const signal = async (id: CompletenessSignalId) => (await load()).getCompletenessSignal(id);
+  const podDoc = (namespace: string, name: string, proxy = true) =>
+    `---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ${name}\n  namespace: ${namespace}\nspec:\n  containers:\n    - name: app\n${proxy ? "    - name: istio-proxy\n      args:\n        - proxy\n        - sidecar\n" : ""}`;
+  /** n injected pods in the dump, the first `withDirs` of them with a proxy dir (config_dump unless noDump). */
+  const sidecars = async (n: number, withDirs: number, noDump = 0) => {
+    for (let i = 0; i < n; i++) {
+      const name = `app-${i}-7d9f8b6c4d-x2k9p`;
+      await appendFile(join(dir, "cluster", "pods"), podDoc("shop", name));
+      if (i >= withDirs) continue;
+      const d = join(dir, "proxies", "shop", name);
+      await mkdir(d, { recursive: true });
+      await writeFile(join(d, i < noDump ? "istio-proxy.log" : "config_dump?include_eds"), "{}");
+    }
+  };
+
+  it("is complete with minor gaps when only minor signals have gaps", async () => {
+    const stale = join(dir, "proxies", "default", "old-pod-zzz99");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "config_dump?include_eds"), "{}");
+    const c = (await load()).getCompleteness();
+    expect(c.signals.filter((s) => s.status === "gap").map((s) => [s.id, s.minor])).toEqual([["stale-proxy-dirs", true]]);
+    expect(c.verdict).toBe("complete_with_minor_gaps");
+    const text = formatCompleteness(c);
+    expect(text[0]).toMatch(/^Data completeness: complete with minor gaps \(1 minor gap\)/);
+    expect(text[1]).toMatch(/^  - \[minor\] stale-proxy-dirs: /);
+  });
+
+  it("is incomplete when any signal has a major gap, and lists major before minor", async () => {
+    await unlink(join(dir, "cluster", "crs"));
+    const stale = join(dir, "proxies", "default", "old-pod-zzz99");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "config_dump?include_eds"), "{}");
+    const c = (await load()).getCompleteness();
+    expect(c.verdict).toBe("incomplete");
+    const text = formatCompleteness(c);
+    expect(text[0]).toMatch(/^Data completeness: INCOMPLETE \(1 major gap, 1 minor gap\)/);
+    expect(text[1]).toMatch(/^  - \[missing\] crs: /);
+    expect(text[2]).toMatch(/^  - \[minor\] stale-proxy-dirs: /);
+  });
+
+  it("does not let a check that could not run set the verdict", async () => {
+    await unlink(join(dir, "bug-report.log"));
+    const c = (await load()).getCompleteness();
+    expect(c.verdict).toBe("complete");
+    const text = formatCompleteness(c);
+    expect(text[0]).toMatch(/^Data completeness: complete \(\d+ checks passed, 1 not evaluated\):$/);
+    expect(text[1]).toMatch(/^  - \[not evaluated\] bug-report-log: /);
+  });
+
+  it("rates missing config_dumps as minor under 10% of live proxy dirs and major from 10%", async () => {
+    await sidecars(19, 19, 1);
+    // 1 of 20 live dirs (19 plus the fixture's).
+    expect(await signal("proxy-config-dump")).toMatchObject({ status: "gap", minor: true });
+    await rm(join(dir, "proxies", "shop", "app-1-7d9f8b6c4d-x2k9p", "config_dump?include_eds"));
+    await writeFile(join(dir, "proxies", "shop", "app-1-7d9f8b6c4d-x2k9p", "istio-proxy.log"), "x");
+    // 2 of 20.
+    expect((await signal("proxy-config-dump")).minor).toBeUndefined();
+  });
+
+  it("rates uncollected ztunnel/CNI pods as minor under 25% of those in the dump and major from 25%", async () => {
+    const names = ["ztunnel-b2c4d", "ztunnel-f5g6h", "ztunnel-j7k8l", "ztunnel-m9n2p", "ztunnel-q4r5s"];
+    for (const name of names) await appendFile(join(dir, "cluster", "pods"), podDoc("istio-system", name, false));
+    for (const name of names.slice(1)) {
+      await mkdir(join(dir, "proxies", "istio-system", name), { recursive: true });
+      await writeFile(join(dir, "proxies", "istio-system", name, "istio-proxy.log"), "x");
+    }
+    expect(await signal("ztunnel-cni-logs")).toMatchObject({ status: "gap", minor: true }); // 1 of 5
+    await rm(join(dir, "proxies", "istio-system", names[1]), { recursive: true });
+    expect((await signal("ztunnel-cni-logs")).minor).toBeUndefined(); // 2 of 5
+  });
+
+  it("rates per-pod collection errors as minor and auth errors on list/watch as major", async () => {
+    await writeFile(join(dir, "bug-report.log"), "Error: failed to port-forward to shop/cart-1: context deadline exceeded\nError: 2 errors occurred:\n\t* exec into shop/cart-2: the server could not find the requested resource (404)\n\t* exec into shop/cart-3: Forbidden\n");
+    expect(await signal("bug-report-log")).toMatchObject({ status: "gap", minor: true });
+    await appendFile(join(dir, "bug-report.log"), "2026-03-18T10:00:00.000Z\terror\tfailed to list *v1.Pod: pods is forbidden: User cannot list resource\n");
+    expect((await signal("bug-report-log")).minor).toBeUndefined();
+  });
+
+  it("rates a missing istiod as major", async () => {
+    await writeFile(join(dir, "bug-report.log"), "Error: could not find istiod in namespace istio-system\n");
+    const s = await signal("bug-report-log");
+    expect(s.summary).toMatch(/no istiod x1/);
+    expect(s.minor).toBeUndefined();
+  });
+
+  it("rates an istioctl one minor behind as minor and two or more as major", async () => {
+    const cp = bugReportVersions("1.31.2").split("\n");
+    const withClient = (v: string) => [...bugReportVersions(v).split("\n").slice(0, 2), ...cp.slice(2)].join("\n");
+    await writeFile(join(dir, "versions"), withClient("1.30.1"));
+    expect(await signal("istioctl-client")).toMatchObject({ status: "gap", minor: true });
+    await writeFile(join(dir, "versions"), withClient("1.29.0"));
+    expect((await signal("istioctl-client")).minor).toBeUndefined();
+  });
+
+  it("rates istiod pods without debug output as minor when another istiod has it", async () => {
+    await mkdir(join(dir, "istio", "istio-system", "istiod-def"), { recursive: true });
+    await writeFile(join(dir, "istio", "istio-system", "istiod-def", "discovery.log"), "x");
+    const s = await signal("istiod-debug");
+    expect(s).toMatchObject({ status: "gap", minor: true });
+    expect(s.summary).toBe("1 of 2 istiod pods have no debug output");
+  });
+
+  it("rates versions derived from pod image tags as minor and unknown versions as major", async () => {
+    await writeFile(join(dir, "versions"), unretrievableVersions("1.31.2"));
+    await writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: [istiodPod("istiod-7f9c-abcde", "1.31.2"), sidecarPod("shop", "cart-1", "1.31.2")] }));
+    expect(await signal("versions")).toMatchObject({ status: "gap", minor: true });
+    await unlink(join(dir, "versions"));
+    await writeFile(join(dir, "cluster", "k8s-resources"), "");
+    expect((await signal("versions")).minor).toBeUndefined();
+  });
+
+  it("flags proxy coverage below half of the injected pods as a major gap", async () => {
+    await sidecars(9, 4);
+    // 5 of 10 injected pods (with the fixture's) have a dir: half is enough.
+    expect((await signal("proxy-coverage")).status).toBe("ok");
+    await rm(join(dir, "proxies", "shop", "app-0-7d9f8b6c4d-x2k9p"), { recursive: true });
+    const s = await signal("proxy-coverage");
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^4 of 10 injected pods in the pod dump have a proxy dir/);
+  });
+
+  it("keeps the structured API: every signal has an id, a status and details", async () => {
+    const store = await load();
+    for (const s of store.getCompleteness().signals) {
+      expect(store.getCompletenessSignal(s.id)).toBe(s);
+      expect(["ok", "gap", "not_evaluated"]).toContain(s.status);
+      expect(Array.isArray(s.details)).toBe(true);
+    }
+  });
+});
