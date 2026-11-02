@@ -11,6 +11,7 @@ import {
   EXTRACT_DIR_PREFIX,
   EXTRACT_MARKER_FILE,
   ExtractionTracker,
+  removeMarkedDir,
   sweepStaleExtractions,
   sweepStaleExtractionsInBackground,
   runStartupSweep,
@@ -390,6 +391,40 @@ describe("installExitCleanup", () => {
     const exited = new Promise<number | null>((res) => child.once("exit", (code) => res(code)));
     child.kill("SIGTERM");
     expect(await exited).toBe(143);
+    expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe("removeMarkedDir", () => {
+  let base: string;
+  beforeEach(async () => { base = await mkdtemp(join(tmpdir(), "remove-marked-test-")); });
+  afterEach(async () => { await rm(base, { recursive: true, force: true }); });
+
+  it("removes only the link, never the files it points at, when the dir was swapped for a symlink", async () => {
+    const outside = join(base, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep"), "user data");
+    const dir = join(base, `${EXTRACT_DIR_PREFIX}swapped`);
+    await symlink(outside, dir);
+
+    await removeMarkedDir(dir);
+
+    expect(existsSync(dir)).toBe(false);
+    expect(existsSync(join(outside, "keep"))).toBe(true);
+  });
+
+  it("removes only the link at process exit too", async () => {
+    const outside = join(base, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep"), "user data");
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(base);
+    await rm(dir, { recursive: true, force: true });
+    await symlink(outside, dir);
+
+    tracker.removeAllSync();
+
+    expect(existsSync(join(outside, "keep"))).toBe(true);
     expect(existsSync(dir)).toBe(false);
   });
 });

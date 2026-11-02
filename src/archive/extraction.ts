@@ -1,5 +1,5 @@
 // Only node: imports, so the exit-cleanup path can be exercised in a child process from the .ts source.
-import { readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { lstat, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
@@ -121,6 +121,8 @@ type ExitTarget = Pick<NodeJS.EventEmitter, "on"> & { exit: (code?: number) => v
 export async function removeMarkedDir(dir: string): Promise<void> {
   let names: string[];
   try {
+    // readdir follows a symlink: a dir swapped for a link must lose only the link.
+    if (!(await lstat(dir)).isDirectory()) return void (await rm(dir, { force: true }));
     names = await readdir(dir);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
@@ -135,6 +137,7 @@ export async function removeMarkedDir(dir: string): Promise<void> {
 function removeMarkedDirSync(dir: string): void {
   let names: string[];
   try {
+    if (!lstatSync(dir).isDirectory()) return rmSync(dir, { force: true });
     names = readdirSync(dir);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
