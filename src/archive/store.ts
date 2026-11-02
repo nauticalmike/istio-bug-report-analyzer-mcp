@@ -437,7 +437,12 @@ export class BugReportStore {
   getEffectiveVersions(): VersionInfo | null {
     if (this.effectiveVersions !== undefined) return this.effectiveVersions;
     const pods = needsImageFallback(this.versions) ? this.getClusterResources({ kind: "Pod" }) : this.scanDaemonSetPods();
-    this.effectiveVersions = withImageFallback(this.versions, pods);
+    let versions = withImageFallback(this.versions, pods);
+    const inventory = this.getPodInventory();
+    if (versions && versions !== this.versions && inventory.available && !inventory.wholeCluster) {
+      versions = { ...versions, imageNamespaces: [...inventory.namespaces].sort() };
+    }
+    this.effectiveVersions = versions;
     return this.effectiveVersions;
   }
 

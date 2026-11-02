@@ -286,26 +286,25 @@ function proxyRole(p: ParsedResource): string | null {
 }
 
 /**
- * Sidecar proxies per namespace: from the pod dump (with the pods, for selector matching),
- * else counted from the collected proxy directories.
+ * Sidecar proxies per namespace: from the pod dump (with the pods, for selector matching) in
+ * the namespaces it covers, else counted from the collected proxy directories. Without
+ * cluster/k8s-resources the pod dump is cluster/pods alone, which holds only the Istio namespace.
  */
 function sidecarsByNamespace(store: BugReportStore): Map<string, { count: number; pods?: ParsedResource[] }> {
   const byNs = new Map<string, { count: number; pods?: ParsedResource[] }>();
   const pods = store.getClusterResources({ kind: "Pod", group: "" });
-  if (pods.length > 0) {
-    for (const p of pods) {
-      const phase = obj(p.status)?.phase;
-      if (phase === "Succeeded" || phase === "Failed" || proxyRole(p) !== "sidecar") continue;
-      const ns = p.metadata.namespace ?? "default";
-      const entry = byNs.get(ns) ?? { count: 0, pods: [] };
-      entry.count++;
-      entry.pods!.push(p);
-      byNs.set(ns, entry);
-    }
-    return byNs;
+  const covered = pods.length > 0 ? store.getPodInventory().namespaces : new Set<string>();
+  for (const p of pods) {
+    const phase = obj(p.status)?.phase;
+    if (phase === "Succeeded" || phase === "Failed" || proxyRole(p) !== "sidecar") continue;
+    const ns = p.metadata.namespace ?? "default";
+    const entry = byNs.get(ns) ?? { count: 0, pods: [] };
+    entry.count++;
+    entry.pods!.push(p);
+    byNs.set(ns, entry);
   }
   for (const proxy of store.getProxyPods()) {
-    if (proxy.proxyType !== "sidecar") continue;
+    if (proxy.proxyType !== "sidecar" || covered.has(proxy.namespace)) continue;
     const entry = byNs.get(proxy.namespace) ?? { count: 0 };
     entry.count++;
     byNs.set(proxy.namespace, entry);

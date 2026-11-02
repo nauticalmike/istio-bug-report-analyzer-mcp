@@ -64,6 +64,13 @@ describe("DIAG-004 Sidecar scoping coverage", () => {
     expect(skipped?.reason).toBe("skipped: 6 sidecar proxies, below the 20 where Sidecar scoping pays off");
   });
 
+  it("counts proxy dirs in namespaces a partial pod dump (cluster/pods only) does not cover", async () => {
+    const dirs = Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`proxies/shop/app-${i}-7d9f8b6c4d-x2k9p/istio-proxy.log`, "started\n"]));
+    const { f, skipped } = await run([], { ...dirs, ...crs(virtualService), "cluster/k8s-resources": null });
+    expect(skipped).toBeUndefined();
+    expect(f?.affectedResources).toContain("namespace shop: 25 sidecars, no Sidecar resource selects them");
+  });
+
   it("reports each sidecar namespace without a Sidecar resource", async () => {
     const resources = [...sidecars("shop", 15), ...sidecars("cart", 25)];
     const { f } = await run(resources, crs(virtualService, sidecarResource("shop", "default")));

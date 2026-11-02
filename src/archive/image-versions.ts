@@ -125,3 +125,9 @@ export function withImageFallback(versions: VersionInfo | null, pods: ParsedReso
     fromImages: { controlPlane: useCp, proxies: useProxies },
   };
 }
+
+/** The tag shown after a list read from pod image tags, naming the namespaces when the pod dump is partial. */
+export function imageTagNote(versions: VersionInfo | null | undefined): string {
+  const partial = versions?.imageNamespaces;
+  return partial ? ` [from pod image tags; pod dump covers only namespaces: ${partial.join(", ")}]` : " [from pod image tags]";
+}

@@ -24,6 +24,11 @@ export interface VersionInfo {
   cniVersions?: ComponentVersion[];
   /** Which lists were filled from pod image tags because the versions file had none. */
   fromImages?: { controlPlane: boolean; proxies: boolean };
+  /**
+   * Set when versions or counts come from pod image tags and the pod dump is only partial
+   * (no cluster/k8s-resources; cluster/pods holds the Istio namespace): the namespaces it covers.
+   */
+  imageNamespaces?: string[];
 }
 
 /** A version and how many pods run it (0 when the source does not record counts). */

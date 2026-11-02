@@ -1,14 +1,13 @@
 import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
 import type { BugReportStore } from "../archive/store.js";
 import type { ComponentVersion, VersionInfo } from "../types.js";
+import { imageTagNote } from "../archive/image-versions.js";
 import { formatCompleteness } from "../archive/completeness.js";
 import { formatCollectionIssues, getCollectionIssues, getCollectionOverflow } from "./collection-issues.js";
 
-const fromImages = (used: boolean | undefined) => (used ? " [from pod image tags]" : "");
-
-function componentLine(label: string, list: ComponentVersion[] | undefined): string[] {
+function componentLine(label: string, list: ComponentVersion[] | undefined, versions: VersionInfo | null): string[] {
   if (!list || list.length === 0) return [];
-  return [`${label}: ${list.map((v) => `${v.version} (${v.count} pod${v.count === 1 ? "" : "s"})`).join(", ")} [from pod image tags]`];
+  return [`${label}: ${list.map((v) => `${v.version} (${v.count} pod${v.count === 1 ? "" : "s"})`).join(", ")}${imageTagNote(versions)}`];
 }
 
 /**
@@ -17,12 +16,13 @@ function componentLine(label: string, list: ComponentVersion[] | undefined): str
  * verdict never disagree. The client is the istioctl that collected the archive.
  */
 export function versionSummaryLines(versions: VersionInfo | null): string[] {
+  const fromImages = (used: boolean | undefined) => (used ? imageTagNote(versions) : "");
   return [
     `istioctl (client) Version: ${versions?.clientVersion ?? "unknown"}`,
     `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.controlPlane)}`,
     `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.proxies)}`,
-    ...componentLine("ztunnel", versions?.ztunnelVersions),
-    ...componentLine("istio-cni", versions?.cniVersions),
+    ...componentLine("ztunnel", versions?.ztunnelVersions, versions),
+    ...componentLine("istio-cni", versions?.cniVersions, versions),
   ];
 }
 

@@ -1,8 +1,8 @@
 import type { BugReportStore } from "../archive/store.js";
 import { clientBehindControlPlane, findVersionSkew, releaseOf } from "../diagnostics/versions.js";
 import type { ComponentVersion } from "../types.js";
+import { imageTagNote } from "../archive/image-versions.js";
 
-const FROM_IMAGES = " [from pod image tags]";
 
 export function getVersions(store: BugReportStore) {
   // Falls back to pod image tags when the versions file is missing or has no versions.
@@ -10,6 +10,7 @@ export function getVersions(store: BugReportStore) {
   if (!versions) {
     return { content: [{ type: "text" as const, text: "No version information available." }] };
   }
+  const FROM_IMAGES = imageTagNote(versions);
   const cpNote = versions.fromImages?.controlPlane ? FROM_IMAGES : "";
   const dpNote = versions.fromImages?.proxies ? FROM_IMAGES : "";
   // A count of 0 means the source did not record one.

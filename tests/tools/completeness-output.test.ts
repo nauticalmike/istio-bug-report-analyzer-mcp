@@ -109,6 +109,14 @@ describe("completeness verdict in tool output", () => {
       });
     }
 
+    it("labels image-tag versions as partial when the pod dump covers only some namespaces", async () => {
+      await writeFile(join(dir, "versions"), unretrievableVersions("1.31.2"));
+      await unlink(join(dir, "cluster", "k8s-resources"));
+      await writeFile(join(dir, "cluster", "pods"), dump({ apiVersion: "v1", kind: "List", items: [istiodPod("istiod-7f9c-abcde", "1.31.2"), sidecarPod("istio-system", "gw-1", "1.31.2")] }));
+      const text = textOf(await getOverview(await BugReportStore.fromDirectory(dir)));
+      expect(text).toContain("Data Plane: 1.31.2 (1 proxies) [from pod image tags; pod dump covers only namespaces: istio-system]");
+    });
+
     it("run_diagnostics keeps the collection-error examples, as it has no Collection issues list", async () => {
       await writeFile(join(dir, "bug-report.log"), collectionLog);
       const text = textOf(await runDiagnostics(await BugReportStore.fromDirectory(dir), {}));
