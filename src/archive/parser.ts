@@ -125,20 +125,30 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
       result.controlPlaneVersions.push({ revision, version: m[1] });
     }
   };
+  // A MeshInfo cut before its closing "}" (a truncated file): read what it has when the next
+  // revision, the next section or the end of the file comes instead.
+  const flushMesh = () => {
+    if (inMeshInfo && cpRevision !== null) addCpVersions(cpRevision, meshLines.join("\n"));
+    inMeshInfo = false;
+    meshLines = [];
+  };
 
   for (const rawLine of content.split("\n")) {
     const line = rawLine.replace(/\r$/, "");
 
     if (/^CLI version:/.test(line)) {
+      flushMesh();
       section = "cli";
       continue;
     }
     if (/control plane revisions\/versions were found/.test(line)) {
+      flushMesh();
       section = "cp";
       cpRevision = null;
       continue;
     }
     if (/proxy revisions\/versions were found/.test(line)) {
+      flushMesh();
       section = "proxy";
       continue;
     }
@@ -152,6 +162,7 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
     } else if (section === "cp") {
       const rev = /^Revision (.+?):\s*$/.exec(line);
       if (rev) {
+        flushMesh();
         cpRevision = rev[1];
         continue;
       }
@@ -189,6 +200,7 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
       }
     }
   }
+  flushMesh();
 }
 
 // A log line in front of the JSON body is short; the start is only looked for in this head.

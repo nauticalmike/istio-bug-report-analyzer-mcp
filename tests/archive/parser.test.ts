@@ -134,6 +134,21 @@ describe("parseVersionsFile", () => {
     expect(v.controlPlaneErrors).toEqual([{ revision: "canary", message: 'no running Istio pods in namespace "istio-system"' }]);
   });
 
+  it("keeps the versions of a pretty-printed MeshInfo that never closes (new revision, section change, EOF)", () => {
+    const open = (rev: string, v: string) => [`Revision ${rev}:`, "&version.MeshInfo{", "    {", '        Component: "pilot",', `        Info:      ${bi(v)},`, "    },"];
+    const head = ["CLI version:", bi("1.30.2"), "", "The following Istio control plane revisions/versions were found in the cluster:"];
+    const nextRevision = parseVersionsFile([...head, ...open("default", "1.29.9"), ...open("canary", "1.30.2"), "}"].join("\n"));
+    expect(nextRevision.controlPlaneVersions).toEqual([
+      { revision: "default", version: "1.29.9" },
+      { revision: "canary", version: "1.30.2" },
+    ]);
+    const sectionChange = parseVersionsFile([...head, ...open("default", "1.29.9"), "The following proxy revisions/versions were found in the cluster:", "Revision default: Versions {1.29.9}"].join("\n"));
+    expect(sectionChange.controlPlaneVersions).toEqual([{ revision: "default", version: "1.29.9" }]);
+    expect(sectionChange.proxyVersions).toEqual([{ version: "1.29.9", count: 0 }]);
+    const eof = parseVersionsFile([...head, ...open("default", "1.29.9")].join("\n"));
+    expect(eof.controlPlaneVersions).toEqual([{ revision: "default", version: "1.29.9" }]);
+  });
+
   it("parses kr/pretty output where BuildInfo is itself multi-line", () => {
     // istioctl up to ~1.19 printed MeshInfo with kr/pretty, which also breaks each nested struct.
     const prettyBuildInfo = (v: string, indent: string) => [
