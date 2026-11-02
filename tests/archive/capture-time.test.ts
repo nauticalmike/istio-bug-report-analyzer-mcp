@@ -42,6 +42,17 @@ describe("BugReportStore.getCaptureTime", () => {
     expect(store.getCaptureTime()?.toISOString()).toBe("2026-03-18T10:00:02.000Z");
   });
 
+  it("uses line timestamps (plain, bracketed access log, JSON time field), not dates inside messages", async () => {
+    const dir = await archive();
+    await writeFile(join(dir, "bug-report.log"), [
+      '{"level":"info","time":"2026-03-18T11:00:00.000000Z","msg":"done"}',
+      "[2026-03-18T10:30:00.000Z] \"GET / HTTP/1.1\" 200",
+      "2026-03-18T10:15:00.000Z\tinfo\tcertificate valid until 2026-09-01T00:00:00Z",
+    ].join("\n"));
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureTime()?.toISOString()).toBe("2026-03-18T11:00:00.000Z");
+  });
+
   it("is null when no log carries a timestamp", async () => {
     const dir = await archive();
     await writeFile(join(dir, "proxies", "default", "test-pod-abc123", "istio-proxy.log"), "plain\n");

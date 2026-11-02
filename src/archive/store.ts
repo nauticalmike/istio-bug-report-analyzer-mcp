@@ -100,8 +100,11 @@ const CLUSTER_DUMP_FILES = [
 
 const LOG_TAIL_BYTES = 16 * 1024;
 const MAX_CAPTURE_LOGS = 500;
-// RFC 3339 UTC timestamps as Istio, Envoy and istioctl log them (2026-03-18T10:00:02.123456Z).
-const LOG_TIMESTAMP_RE = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/g;
+// RFC 3339 UTC timestamps as Istio, Envoy and istioctl log them (2026-03-18T10:00:02.123456Z):
+// at the start of a line (optionally bracketed, as in Envoy access logs) or in a JSON log's
+// time field. Dates inside messages (certificate expiries and the like) are not log times.
+const TS = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`;
+const LOG_TIMESTAMP_RE = new RegExp(String.raw`(?:^\[?(${TS})|"(?:time|timestamp|ts)"\s*:\s*"(${TS})")`, "gm");
 
 function logRank(path: string): number {
   if (path === "bug-report.log") return 0;
@@ -370,7 +373,7 @@ export class BugReportStore {
     for (const f of logs) {
       const tail = this.readFileRange(f.relativePath, Math.max(0, f.size - LOG_TAIL_BYTES), LOG_TAIL_BYTES)?.text ?? "";
       for (const m of tail.matchAll(LOG_TIMESTAMP_RE)) {
-        const t = Date.parse(m[1]);
+        const t = Date.parse(m[1] ?? m[2]);
         if (t > newest && t <= limit) newest = t;
       }
     }
