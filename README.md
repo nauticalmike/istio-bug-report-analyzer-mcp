@@ -40,13 +40,13 @@ Then restart Claude Code to pick up the new skill.
 | `collect_bug_report` | Run `istioctl bug-report` against a cluster and load results |
 | `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
 | `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop), collection issues and cluster dump size warnings |
-| `get_versions` | Version matrix with skew detection |
+| `get_versions` | Version matrix with minor-level skew detection (control plane, proxies, ztunnel, istio-cni), falling back to pod image tags when the `versions` file is unusable; collapses repeated MeshInfo and warns when istioctl is older than the control plane |
 | `get_analyze_results` | `istioctl analyze` results (IST codes), with a count per code; paged with `limit`/`offset` |
 | `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects; paged with `limit`/`offset` (`full: true` returns the objects as JSON) |
 | `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel; paged by character `offset` |
 | `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering; most recent lines by default, `offset` pages from the oldest |
 | `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected; paged by character `offset` |
-| `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive |
+| `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive; lists checks that could not be evaluated (see [Diagnostics](#diagnostics)) |
 | `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern; paged with `limit`/`offset` |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
 | `list_files` | List all files in the archive; paged with `offset` |

@@ -35,7 +35,7 @@ Confirm the archive loaded successfully and show the overview.
 Run these tools in sequence:
 1. `get_overview` — capture the cluster profile
 2. `get_versions` — capture the version matrix, check for skew
-3. `run_diagnostics` — run all diagnostic templates
+3. `run_diagnostics` — run all diagnostic templates; report any checks listed under "Not evaluated or skipped" as gaps in the data, not as passed
 4. `get_analyze_results` — capture istioctl analyze output (use `severity: "Error"` first, then `"Warning"` separately if needed)
 5. `find_errors` — scan all logs for errors/warnings
 
@@ -97,7 +97,7 @@ Interpret the results based on the detected data plane mode:
 - **Interop mode**: Identify which sidecar namespaces would benefit most from completing the migration to ambient. Show the per-namespace savings potential.
 
 Cross-reference with diagnostic findings:
-- If DIAG-004 (missing sidecar resources) fired, the resource analysis quantifies the un-bounded resource consumption
+- If DIAG-004 (sidecars without Sidecar scoping) fired, the resource analysis quantifies the un-bounded resource consumption
 - If high proxy memory/CPU optimization opportunities appear, include them in the remediation roadmap
 
 If Solo.io tools are available (soloio-docs-mcp, Support-Agent-Tools, SoloKnowledgeBaseMCP):
