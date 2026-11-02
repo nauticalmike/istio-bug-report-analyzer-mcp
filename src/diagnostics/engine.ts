@@ -7,6 +7,7 @@ import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
 import {
   demoProfileEvidence,
+  istiodsByLoad,
   riskyEnvoyFilters,
   sidecarScopeGaps,
   singleReplicaIstiods,
@@ -142,11 +143,16 @@ export class DiagnosticEngine {
   }
 
   private async evaluateSignal(signal: Signal, store: BugReportStore, cache: IssueCache): Promise<boolean> {
-    const value = await this.resolveSignalValue(signal.source, store, cache);
+    const value = await this.resolveSignalValue(signal.source, store, cache, signal.check.op);
     return evaluateCheck(signal.check, value);
   }
 
-  private async resolveSignalValue(source: Signal["source"], store: BugReportStore, cache: IssueCache): Promise<unknown> {
+  private async resolveSignalValue(
+    source: Signal["source"],
+    store: BugReportStore,
+    cache: IssueCache,
+    op: Signal["check"]["op"],
+  ): Promise<unknown> {
     const issues = issuesFor(source, store, cache);
     if (issues) return issues.length > 0 ? issues : null;
     switch (source.type) {
@@ -166,34 +172,28 @@ export class DiagnosticEngine {
         return resources.map((r) => getNestedValue(r, source.field));
       }
       case "logs": {
+        // Count checks get every matching file; other checks get the first matching log text.
+        const counting = op === "count_gt" || op === "count_lt";
         const re = new RegExp(source.pattern);
+        const files: { label: string; read: () => string | null | Promise<string | null> }[] = [];
         if (source.component === "proxy" || source.component === "all") {
-          for (const pod of store.getProxyPods()) {
-            const logs = pod.logs;
-            if (logs && re.test(logs)) return logs;
-          }
+          for (const pod of store.getProxyPods()) files.push({ label: `proxies/${pod.namespace}/${pod.podName}`, read: () => pod.logs });
         }
         if (source.component === "istiod" || source.component === "all") {
-          for (const pod of store.getIstiodPods()) {
-            const discoveryLog = pod.discoveryLog;
-            if (discoveryLog && re.test(discoveryLog)) return discoveryLog;
-          }
+          for (const pod of store.getIstiodPods()) files.push({ label: `istio/${pod.namespace}/${pod.podName}`, read: () => pod.discoveryLog });
         }
-        if (source.component === "operator" || source.component === "all") {
-          const opFiles = store.getAllFiles().filter((f) => f.startsWith("operator/"));
-          for (const f of opFiles) {
-            const content = await store.getRawFile(f);
-            if (content && re.test(content)) return content;
-          }
+        for (const [component, prefix] of [["operator", "operator/"], ["cni", "cni/"]] as const) {
+          if (source.component !== component && source.component !== "all") continue;
+          for (const f of store.getAllFiles().filter((path) => path.startsWith(prefix))) files.push({ label: f, read: () => store.getRawFile(f) });
         }
-        if (source.component === "cni" || source.component === "all") {
-          const cniFiles = store.getAllFiles().filter((f) => f.startsWith("cni/"));
-          for (const f of cniFiles) {
-            const content = await store.getRawFile(f);
-            if (content && re.test(content)) return content;
-          }
+        const matched: string[] = [];
+        for (const { label, read } of files) {
+          const content = await read();
+          if (!content || !re.test(content)) continue;
+          if (!counting) return content;
+          matched.push(label);
         }
-        return null;
+        return matched.length > 0 ? matched : null;
       }
       case "proxy": {
         const pods = store.getProxyPods();
@@ -206,10 +206,11 @@ export class DiagnosticEngine {
         return store.getProxyConfig(pod.namespace, pod.podName, source.section);
       }
       case "istiod": {
-        const pods = store.getIstiodPods();
-        if (pods.length === 0) return null;
-        const data = pods[0].debugEndpoints.get(source.endpoint);
-        if (!data) return null;
+        // The istiod serving the most proxies that has the endpoint: in multi-revision
+        // archives the first one listed can be an idle revision.
+        const pod = istiodsByLoad(store).find((p) => p.debugEndpoints.get(source.endpoint));
+        if (!pod) return null;
+        const data = pod.debugEndpoints.get(source.endpoint);
         return source.path ? getNestedValue(data, source.path) : data;
       }
       default:

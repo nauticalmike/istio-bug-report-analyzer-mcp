@@ -1,6 +1,6 @@
 import { load } from "js-yaml";
 import type { BugReportStore } from "../archive/store.js";
-import type { ParsedResource } from "../types.js";
+import type { IstiodInfo, ParsedResource } from "../types.js";
 
 export interface Issue {
   detail: string;
@@ -41,9 +41,29 @@ function istiodDeployments(store: BugReportStore): ParsedResource[] {
 
 // --- Mesh config ---------------------------------------------------------
 
-/** MeshConfig from istiod's debug/mesh endpoint, else the `istio` ConfigMap's `mesh` key. */
+const istiodOrder = new WeakMap<BugReportStore, IstiodInfo[]>();
+
+/**
+ * istiod pods, the one serving the most proxies (debug/syncz entries) first; pods without
+ * syncz keep their order after those with it. In multi-revision archives the first istiod
+ * listed can be an idle revision, whose debug data says nothing about the live mesh.
+ */
+export function istiodsByLoad(store: BugReportStore): IstiodInfo[] {
+  const cached = istiodOrder.get(store);
+  if (cached) return cached;
+  const load = (p: IstiodInfo) => {
+    if (!p.debugEndpoints.has("syncz")) return -1;
+    const syncz = p.debugEndpoints.get("syncz");
+    return Array.isArray(syncz) ? syncz.length : 0;
+  };
+  const ordered = store.getIstiodPods().map((p) => ({ p, n: load(p) })).sort((a, b) => b.n - a.n).map(({ p }) => p);
+  istiodOrder.set(store, ordered);
+  return ordered;
+}
+
+/** MeshConfig from the busiest istiod's debug/mesh endpoint, else the `istio` ConfigMap's `mesh` key. */
 export function meshConfig(store: BugReportStore): Obj | null {
-  for (const pod of store.getIstiodPods()) {
+  for (const pod of istiodsByLoad(store)) {
     const mesh = obj(pod.debugEndpoints.get("mesh"));
     if (mesh) return mesh;
   }
