@@ -1,8 +1,8 @@
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 import { BugReportStore } from "../archive/store.js";
-import { extractArchive } from "../archive/extractor.js";
+import { extractArchive, findReportTrees, isReportTree } from "../archive/extractor.js";
 import {
   checkFreeSpace,
   estimateExpandedSize,
@@ -62,6 +62,32 @@ async function extractWithChecks(path: string, parent: string, opts: LoadOptions
   }
 }
 
+/**
+ * A warning when the loaded report is one of several per-cluster trees (a collector that writes
+ * one tree per cluster under a common top directory) or when the loaded directory holds no
+ * sections of its own but such trees: only one tree is ever loaded, the rest would be ignored.
+ * `extractionRoot` is the extraction dir of an archive (searched for sibling trees).
+ */
+async function reportTreeNote(archiveDir: string, extractionRoot: string | undefined): Promise<string | null> {
+  const name = (t: string, from: string) => relative(from, t) || basename(t);
+  if (!(await isReportTree(archiveDir))) {
+    const inside = await findReportTrees(archiveDir);
+    if (inside.length === 0) return null;
+    return (
+      `${archiveDir} has no report sections at its root but holds ${inside.length} per-cluster report trees ` +
+      `(${inside.map((t) => name(t, archiveDir)).join(", ")}): load one of them by path (${inside.join(", ")}); nothing below reflects them`
+    );
+  }
+  if (!extractionRoot) return null;
+  const trees = await findReportTrees(extractionRoot);
+  const others = trees.filter((t) => resolve(t) !== resolve(archiveDir));
+  if (others.length === 0) return null;
+  return (
+    `the archive holds ${trees.length} per-cluster report trees (${trees.map((t) => name(t, extractionRoot)).join(", ")}); ` +
+    `only ${name(archiveDir, extractionRoot)} is loaded. Load the others by path to analyze them: ${others.join(", ")}`
+  );
+}
+
 export async function loadBugReport(
   { path, extract_dir }: { path: string; extract_dir?: string },
   getStore: () => BugReportStore | null,
@@ -93,6 +119,7 @@ export async function loadBugReport(
       return errorResult(`Error: path must be a directory or .tar.gz file. Got: ${path}`);
     }
 
+    const treeNote = await reportTreeNote(archiveDir, tempDir);
     const store = await (opts.openStore ?? BugReportStore.fromDirectory)(archiveDir);
     const versions = store.getVersions();
     const analyzeResults = store.getAnalyzeResults();
@@ -159,6 +186,7 @@ export async function loadBugReport(
     const clusterLines = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
     if (clusterLines.length > 0) summary.push("", ...clusterLines);
     if (issueLines.length > 0) summary.push("", ...issueLines);
+    if (treeNote) summary.push("", `Warning: ${treeNote}`);
     if (extractWarning) summary.push("", `Warning: ${extractWarning}`);
 
     return { content: [{ type: "text" as const, text: summary.join("\n") }] };

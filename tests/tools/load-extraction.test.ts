@@ -167,6 +167,30 @@ describe("loadBugReport extraction lifecycle", () => {
     expect((await pending).isError).toBeUndefined();
   });
 
+  it("says so when an archive holds several per-cluster report trees and only one is loaded", async () => {
+    const src = join(tempDir, "multi-src");
+    for (const name of ["bug-report-east", "bug-report-west"]) await createMinimalArchive(join(src, name));
+    const file = join(tempDir, "multi.tar.gz");
+    await tar.create({ gzip: true, file, cwd: src }, ["bug-report-east", "bug-report-west"]);
+    const text = textOf(await load(file));
+    const m = /holds 2 per-cluster report trees \(bug-report-east, bug-report-west\); only (bug-report-east|bug-report-west) is loaded/.exec(text);
+    expect(m).not.toBeNull();
+    const other = m![1] === "bug-report-east" ? "bug-report-west" : "bug-report-east";
+    expect(text).toContain(join(extractParent, (await extracted())[0], other));
+  });
+
+  it("says which report trees a loaded directory holds when it has no report sections of its own", async () => {
+    const top = join(tempDir, "collector-output");
+    for (const name of ["cluster-a", "cluster-b", "cluster-c"]) await createMinimalArchive(join(top, name));
+    const text = textOf(await load(top));
+    expect(text).toMatch(/has no report sections at its root but holds 3 per-cluster report trees \(cluster-a, cluster-b, cluster-c\): load one of them by path/);
+    expect(text).toContain(join(top, "cluster-b"));
+  });
+
+  it("adds no tree note for a single istioctl report", async () => {
+    expect(textOf(await load(await makeTarball("a")))).not.toMatch(/report trees/);
+  });
+
   it("does not list the ownership marker as a report file", async () => {
     const src = join(tempDir, "flat-src");
     await createMinimalArchive(src);

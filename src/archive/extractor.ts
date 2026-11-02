@@ -97,3 +97,38 @@ export async function extractArchive(archivePath: string, outputDir: string): Pr
   const bugReportDir = entries.find((e) => e.isDirectory() && e.name.startsWith("bug-report"));
   return bugReportDir ? join(outputDir, bugReportDir.name) : outputDir;
 }
+
+/** Section directories of a bug-report tree (istioctl's, and collectors that copy its layout). */
+const SECTION_DIRS = new Set(["cluster", "proxies", "istio", "analyze", "cni", "operator"]);
+
+async function sectionDirs(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+  return entries.filter((e) => e.isDirectory() && SECTION_DIRS.has(e.name)).map((e) => e.name);
+}
+
+/** A directory that holds a report of its own: a cluster/ section, or two other sections. */
+export async function isReportTree(dir: string): Promise<boolean> {
+  const sections = await sectionDirs(dir);
+  return sections.includes("cluster") || sections.length >= 2;
+}
+
+/**
+ * Report trees below `dir` (not `dir` itself), at most `maxDepth` levels down, sorted by
+ * path. Some collectors write one tree per cluster under a common top directory; only one
+ * of them is loaded, so the load says which others exist. Section directories are not searched.
+ */
+export async function findReportTrees(dir: string, maxDepth = 2): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (current: string, depth: number) => {
+    if (depth > maxDepth) return;
+    const entries = await readdir(current, { withFileTypes: true }).catch(() => []);
+    for (const e of entries) {
+      if (!e.isDirectory() || SECTION_DIRS.has(e.name)) continue;
+      const path = join(current, e.name);
+      if (await isReportTree(path)) found.push(path);
+      else await walk(path, depth + 1);
+    }
+  };
+  await walk(dir, 1);
+  return found.sort();
+}
