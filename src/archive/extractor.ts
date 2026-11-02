@@ -65,11 +65,23 @@ async function walkDir(basePath: string, currentPath: string, files: FileEntry[]
   }
 }
 
+const OUT_OF_SPACE_CODES = new Set(["ENOSPC", "EDQUOT"]);
+
 export async function extractArchive(archivePath: string, outputDir: string): Promise<string> {
+  // node-tar reports a failed entry write as a warning (non-strict mode); a full disk
+  // must fail the extraction instead of leaving truncated files behind.
+  let outOfSpace: { code: string; message: string } | null = null;
   await tar.extract({
     file: archivePath,
     cwd: outputDir,
+    onwarn: (_code, message, data) => {
+      if (!outOfSpace && data?.code && OUT_OF_SPACE_CODES.has(data.code)) outOfSpace = { code: data.code, message };
+    },
   });
+  if (outOfSpace) {
+    const { code, message } = outOfSpace;
+    throw Object.assign(new Error(`${message} (while extracting into ${outputDir})`), { code });
+  }
 
   // Older istioctl wraps everything in a `bug-report/` directory; newer
   // releases (1.30+) place the sections at the tar root next to a *file*
