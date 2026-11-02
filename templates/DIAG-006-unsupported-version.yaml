@@ -21,7 +21,8 @@ signals:
   #   n-4 patching applies "only with a -solo distribution of Istio, not community
   #   Istio versions" (docs.solo.io/istio/1.31.x/reference/versions/, n = 1.31).
   #   Shift by one minor when Solo ships a new stable minor.
-  # Support is judged as of the capture date (the newest log timestamp in the archive):
+  # Support is judged as of the capture date (BugReportStore.getCaptureInfo: newest log
+  # timestamp, else istiod debug log prefix, cluster/events, pod times; info when none):
   # endOfLife and released are istio.io's "End of Life" and "Release Date" columns. Add a
   # minor's end-of-life day when it leaves `supported`, and its release day when it ships;
   # scripts/check-istio-support.mjs reports both when they drift.

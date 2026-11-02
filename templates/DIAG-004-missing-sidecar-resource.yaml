@@ -19,7 +19,8 @@ impact: >
 signals:
   # Coverage per sidecar namespace (sidecar_scope in src/diagnostics/checks.ts):
   # - not evaluated when cluster/crs is missing, empty or unparsed (Sidecars live there);
-  # - skipped for meshes under 20 sidecar proxies (SIDECAR_SCOPE_MIN_SIDECARS);
+  # - skipped for meshes under 20 sidecar proxies (SIDECAR_SCOPE_MIN_SIDECARS), counting
+  #   only explicit `proxy sidecar` pods, and proxy dirs where the pod dump is partial;
   # - ambient namespaces are left out (a Sidecar resource has no effect there, IST0167);
   # - a selector-less Sidecar in the root namespace covers the whole mesh.
   - source:
