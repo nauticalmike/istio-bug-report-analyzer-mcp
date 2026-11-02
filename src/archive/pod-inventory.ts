@@ -49,26 +49,53 @@ export function isLive(p: PodRecord): boolean {
 
 export const podKey = (namespace: string, name: string) => `${namespace}/${name}`;
 
+/** A copy that shares no memory with the item text it was sliced from (which it would keep alive). */
+const own = (v: string) => Buffer.from(v, "utf8").toString("utf8");
+
 const unquote = (v: string) => v.trim().replace(/^(["'])(.*)\1$/, "$2");
 
-/** The lines of a top-level `key:` block of a (dedented) List item, or "" when it has none. */
+/** Offset where a top-level `key:` line of a (dedented) List item starts, or -1. */
+function topKey(text: string, key: string): number {
+  const prefix = `${key}:`;
+  if (text.startsWith(prefix)) return 0;
+  const at = text.indexOf(`\n${prefix}`);
+  return at === -1 ? -1 : at + 1;
+}
+
+/** The lines of a top-level `key:` block (up to the next line at column 0), or "" when it has none. */
 function topBlock(text: string, key: string): string {
-  const m = new RegExp(`(?:^|\\n)${key}:[ \\t]*\\r?\\n`).exec(text);
-  if (!m) return "";
-  const start = m.index + m[0].length;
-  // The block ends at the next line that starts at column 0.
-  const end = /\n(?=\S)/.exec(text.slice(start));
-  return text.slice(start, end ? start + end.index : text.length);
+  const at = topKey(text, key);
+  if (at === -1) return "";
+  const start = text.indexOf("\n", at);
+  if (start === -1) return "";
+  let end = start;
+  for (;;) {
+    end = text.indexOf("\n", end + 1);
+    if (end === -1) return text.slice(start + 1);
+    const c = text.charCodeAt(end + 1);
+    if (c !== 0x20 && c !== 0x0a && c !== 0x0d) return text.slice(start + 1, end);
+  }
 }
 
-/** A scalar key at the block's own indent (the indent of its first line). */
+/** A scalar `key:` at the block's own indent (the indent of its first line). */
 function blockScalar(block: string, key: string): string | null {
-  const indent = /^( *)/.exec(block)?.[1] ?? "";
-  const m = new RegExp(`(?:^|\\n)${indent}${key}:[ \\t]*([^\\n#]+)`).exec(block);
-  return m ? unquote(m[1]) || null : null;
+  let indent = 0;
+  while (block.charCodeAt(indent) === 0x20) indent++;
+  const prefix = `${" ".repeat(indent)}${key}:`;
+  for (let at = 0; at !== -1 && at < block.length; ) {
+    if (block.startsWith(prefix, at) && block.charCodeAt(at + indent) !== 0x20) {
+      const end = block.indexOf("\n", at);
+      const value = unquote(block.slice(at + prefix.length, end === -1 ? undefined : end).replace(/\s#.*$/, ""));
+      return value ? own(value) : null;
+    }
+    at = block.indexOf("\n", at);
+    if (at !== -1) at++;
+  }
+  return null;
 }
 
-const ISTIO_PROXY_RE = /^\s*(?:- )?name:\s*["']?istio-proxy["']?\s*$/m;
+// Anywhere in a Pod item: the container (and its status entry) or the ztunnel args/image.
+const ISTIO_PROXY_RE = /(?:^|[ \t-])name:[ \t]*["']?istio-proxy["']?[ \t]*\r?$/m;
 const ZTUNNEL_ARG_RE = /^\s*- ["']?ztunnel["']?\s*$/m;
 const ZTUNNEL_IMAGE_RE = /image:\s*["']?[^\s"']*ztunnel[:@]/;
 
@@ -80,15 +107,16 @@ interface ItemSummary {
 
 /** Reads kind, namespace and (for a Pod) its record off a List item's YAML text, without parsing it. */
 function summarizeText(text: string): ItemSummary {
-  const kindLine = /(?:^|\n)kind:[ \t]*([^\n#]+)/.exec(text);
-  const kind = kindLine ? unquote(kindLine[1]) : null;
+  const kindAt = topKey(text, "kind");
+  const kindEnd = kindAt === -1 ? -1 : text.indexOf("\n", kindAt);
+  const kind = kindAt === -1 ? null : unquote(text.slice(kindAt + 5, kindEnd === -1 ? undefined : kindEnd).replace(/\s#.*$/, ""));
   const metadata = topBlock(text, "metadata");
   const namespace = blockScalar(metadata, "namespace");
   if (kind !== "Pod") return { kind, namespace };
   const name = blockScalar(metadata, "name");
   if (!name) return { kind, namespace };
-  const spec = topBlock(text, "spec");
-  const ztunnel = ZTUNNEL_ARG_RE.test(spec) || ZTUNNEL_IMAGE_RE.test(spec);
+  // The substring checks first: the regexes cost a scan of every line of every pod.
+  const ztunnel = text.includes("ztunnel") && (ZTUNNEL_ARG_RE.test(text) || ZTUNNEL_IMAGE_RE.test(text));
   return {
     kind,
     namespace,
@@ -96,7 +124,7 @@ function summarizeText(text: string): ItemSummary {
       namespace: namespace ?? "default",
       name,
       phase: blockScalar(topBlock(text, "status"), "phase"),
-      injected: ISTIO_PROXY_RE.test(spec) && !ztunnel && !daemonKind(name),
+      injected: text.includes("istio-proxy") && ISTIO_PROXY_RE.test(text) && !ztunnel && !daemonKind(name),
       daemon: daemonKind(name),
     },
   };
