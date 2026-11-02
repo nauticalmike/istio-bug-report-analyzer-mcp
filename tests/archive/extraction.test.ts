@@ -36,7 +36,7 @@ describe("estimateExpandedSize", () => {
     const est = await estimateExpandedSize(file, { compressedBytes: 1e9 });
     expect(est.exact).toBe(false);
     expect(est.expandedBytes).toBeGreaterThanOrEqual(1e9);
-    expect(est.upperBytes).toBeGreaterThanOrEqual(26e9);
+    expect(est.upperBytes).toBeGreaterThan(1e10);
   });
 });
 

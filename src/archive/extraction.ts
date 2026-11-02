@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 export const EXTRACT_DIR_PREFIX = "bug-report-extract-";
 
-// Bug-report archives are mostly text; the highest expansion seen is about 26x.
+// Bug-report archives are mostly text and compress well; assume they expand at most this much.
 const MAX_EXPANSION_RATIO = 30;
 // gzip records the expanded size modulo 2^32 in its last four bytes (ISIZE).
 const ISIZE_MODULO = 2 ** 32;

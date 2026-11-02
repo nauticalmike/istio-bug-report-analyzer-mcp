@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { BugReportStore } from "../archive/store.js";
 import { extractArchive } from "../archive/extractor.js";
 import {
@@ -49,7 +50,8 @@ async function extractWithChecks(path: string, parent: string, opts: LoadOptions
   } catch (error) {
     await opts.tracker.remove(tempDir);
     const reason = error instanceof Error ? error.message : String(error);
-    const space = (error as NodeJS.ErrnoException)?.code === "ENOSPC" ? ` Ran out of space in ${parent}; pass extract_dir on a larger volume.` : "";
+    const code = (error as NodeJS.ErrnoException)?.code;
+    const space = code === "ENOSPC" || code === "EDQUOT" ? ` Ran out of space in ${parent}; pass extract_dir on a larger volume.` : "";
     return { error: `Error extracting ${path}: ${reason}.${space} The partial extraction was deleted.` };
   }
 }
@@ -70,7 +72,7 @@ export async function loadBugReport(
     if (pathStat.isDirectory()) {
       archiveDir = path;
     } else if (path.endsWith(".tar.gz") || path.endsWith(".tgz")) {
-      const extraction = await extractWithChecks(path, extract_dir ?? tmpdir(), opts);
+      const extraction = await extractWithChecks(path, resolve(extract_dir ?? tmpdir()), opts);
       if ("error" in extraction) return errorResult(extraction.error);
       ({ archiveDir, tempDir, warning: extractWarning } = extraction);
     } else {
