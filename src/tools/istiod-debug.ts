@@ -46,7 +46,14 @@ export async function getIstiodDebug(
     return { content: [{ type: "text" as const, text: listing + note }] };
   }
 
+  const path = `istio/${targetPod.namespace}/${targetPod.podName}/debug/${params.endpoint}`;
+  const tooLarge = targetPod.debugEndpoints.has(params.endpoint) ? store.tooLargeToParse(path) : null;
+  if (tooLarge) return { content: [{ type: "text" as const, text: tooLarge }], isError: true };
+
   const data = targetPod.debugEndpoints.get(params.endpoint);
+  if (data === null) {
+    return { content: [{ type: "text" as const, text: `${path} could not be read; try get_raw_file.` }], isError: true };
+  }
   if (data === undefined) {
     const available = Array.from(targetPod.debugEndpoints.keys()).join(", ") || "none";
     return {

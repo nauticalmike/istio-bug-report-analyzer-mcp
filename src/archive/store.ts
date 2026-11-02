@@ -15,7 +15,7 @@ import {
   type StaleProxyDirs,
 } from "./completeness.js";
 import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
-import { extractNamespaceResourcesFromFile, parseClusterDumpFile, scanClusterDumpItems, type ScanInfo } from "./namespace-scan.js";
+import { MAX_STRING_BYTES, extractNamespaceResourcesFromFile, parseClusterDumpFile, scanClusterDumpItems, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import { needsImageFallback, withImageFallback } from "./image-versions.js";
@@ -545,6 +545,17 @@ export class BugReportStore {
   /** Size in bytes from the archive index, or null when the file is not in the archive. */
   getFileSize(relativePath: string): number | null {
     return this.fileEntries.get(relativePath)?.size ?? null;
+  }
+
+  /**
+   * Why a file cannot be read whole and parsed (over V8's ~512 MiB string limit), with how to
+   * read it instead; null when it is missing or small enough. Tools check this first so the
+   * whole-file read, which fails silently past the limit, is never attempted.
+   */
+  tooLargeToParse(relativePath: string | null): string | null {
+    const size = relativePath ? this.getFileSize(relativePath) : null;
+    if (size === null || size <= MAX_STRING_BYTES) return null;
+    return `${relativePath} is ${formatMB(size)}, too large to parse; read it with get_raw_file offset/length`;
   }
 
   /** Modification time (ms) from the archive index, or null when the file is not in the archive. */

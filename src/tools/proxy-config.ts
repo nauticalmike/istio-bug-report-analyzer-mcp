@@ -5,6 +5,10 @@ export function getProxyConfig(
   store: BugReportStore,
   params: { namespace: string; pod: string; section?: string; offset?: number },
 ) {
+  const section = !params.section || params.section === "all" ? "config_dump" : params.section;
+  const tooLarge = store.tooLargeToParse(store.getProxySectionPath(params.namespace, params.pod, section));
+  if (tooLarge) return { content: [{ type: "text" as const, text: tooLarge }], isError: true };
+
   const config = store.getProxyConfig(params.namespace, params.pod, params.section);
   if (config === null) {
     return { content: [{ type: "text" as const, text: notFoundMessage(store, params) }], isError: true };
