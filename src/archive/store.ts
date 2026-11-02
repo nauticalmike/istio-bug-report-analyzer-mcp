@@ -15,7 +15,7 @@ import {
   type StaleProxyDirs,
 } from "./completeness.js";
 import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
-import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
+import { extractNamespaceResourcesFromFile, parseClusterDumpFile, scanClusterDumpItems, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import { needsImageFallback, withImageFallback } from "./image-versions.js";
@@ -384,16 +384,34 @@ export class BugReportStore {
   }
 
   /**
-   * The versions file completed from pod image tags (see withImageFallback). The pod dump is
-   * parsed for this only when the file is missing or lists no control plane or proxy
-   * versions; otherwise image versions (ztunnel, istio-cni) are added once the cluster dumps
-   * have been parsed by another tool.
+   * The versions file completed from pod image tags (see withImageFallback). When the file
+   * is missing or lists no control plane or proxy versions, the cluster dump is parsed for
+   * the pods. Otherwise only ztunnel and istio-cni versions come from images, and those are
+   * read by a streaming scan that parses just the items naming ztunnel or install-cni, never
+   * from the parsed dump, so the answer does not depend on whether another tool parsed it.
    */
   getEffectiveVersions(): VersionInfo | null {
     if (this.effectiveVersions !== undefined) return this.effectiveVersions;
-    if (!needsImageFallback(this.versions) && !this.isClusterResourcesParsed()) return this.versions;
-    this.effectiveVersions = withImageFallback(this.versions, this.getClusterResources({ kind: "Pod" }));
+    const pods = needsImageFallback(this.versions) ? this.getClusterResources({ kind: "Pod" }) : this.scanDaemonSetPods();
+    this.effectiveVersions = withImageFallback(this.versions, pods);
     return this.effectiveVersions;
+  }
+
+  /** Pods whose dump item mentions ztunnel or install-cni, across the dumps, deduplicated like the full parse. */
+  private scanDaemonSetPods(): ParsedResource[] {
+    const seen = new Set<string>();
+    const pods: ParsedResource[] = [];
+    const keep = (text: string) => text.includes("ztunnel") || text.includes("install-cni");
+    for (const file of CLUSTER_DUMP_FILES) {
+      for (const r of scanClusterDumpItems(this.pathIndex.get(file), keep)) {
+        if (r?.kind !== "Pod") continue;
+        const key = resourceKey(r);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pods.push(r);
+      }
+    }
+    return pods;
   }
 
   /**

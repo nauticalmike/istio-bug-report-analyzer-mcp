@@ -45,6 +45,8 @@ interface ScanMode {
   /** No full-parse fallback exists: skip items that do not parse instead of falling back. */
   lenient: boolean;
   info?: ScanInfo;
+  /** `all` mode only: parse just the List items whose raw text passes this test. */
+  keep?: (itemText: string) => boolean;
 }
 
 const NAMESPACES: ScanMode = { all: false, lenient: false };
@@ -147,6 +149,43 @@ export function parseClusterDumpFile(path: string | undefined, info?: ScanInfo, 
   }
 }
 
+/** Largest dump the item scan falls back to parsing whole when it meets YAML it does not model. */
+const MATCHING_FALLBACK_BYTES = 256 * 2 ** 20;
+
+/**
+ * The resources of a cluster dump whose List item text passes `keep`, streamed like
+ * parseClusterDumpFile but YAML-parsing only the kept items, so a large dump costs a
+ * byte scan and a few small parses. Items that do not parse are skipped. A dump the
+ * scanner does not model (JSON, flow items, ...) is parsed whole and filtered when it
+ * is at most 256 MiB, else yields nothing. Plain (non-List) documents are always kept.
+ */
+export function scanClusterDumpItems(path: string | undefined, keep: (itemText: string) => boolean): ParsedResource[] {
+  if (!path) return [];
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return [];
+  }
+  try {
+    const size = fstatSync(fd).size;
+    const source: ByteSource = { size, readInto: (t, o, l, p) => readSync(fd, t, o, l, p) };
+    try {
+      return scan(source, { all: true, lenient: true, keep });
+    } catch (e) {
+      if (!(e instanceof Fallback) && !(e instanceof RangeError)) throw e;
+      if (size > MATCHING_FALLBACK_BYTES) return [];
+      try {
+        return parseYamlMultiDoc(readFileSync(path, "utf8")).filter((r) => keep(JSON.stringify(r)));
+      } catch {
+        return [];
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const mib = (bytes: number) => `${Math.floor(bytes / 2 ** 20)} MiB`;
 
 function withFallback(
@@ -214,6 +253,7 @@ function scan(src: ByteSource, mode: ScanMode): ParsedResource[] {
       const dedent = new RegExp(`\\n${pad}`, "g");
       for (const [s, e] of doc.items) {
         const text = itemText(s, e, pad, dedent);
+        if (mode.keep && !mode.keep(text)) continue;
         if (!mode.all) {
           out.push(...checked(namespacesIn(text), 1));
           continue;
