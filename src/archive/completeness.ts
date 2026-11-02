@@ -1,7 +1,6 @@
-import { closeSync, openSync, readSync } from "node:fs";
-import { StringDecoder } from "node:string_decoder";
 import { clientBehindControlPlane, parseMinor } from "../diagnostics/versions.js";
 import type { BugReportStore } from "./store.js";
+import { isLive, podKey, type PodInventory } from "./pod-inventory.js";
 import { MAX_COLLECTION_ISSUES } from "../tools/collection-issues.js";
 
 /**
@@ -43,6 +42,11 @@ export interface StaleProxyDirs {
   evaluated: boolean;
   /** "namespace/pod" of proxy dirs whose pod is not in the cluster dump. */
   stale: string[];
+  /**
+   * "namespace/pod" of proxy dirs in namespaces the pod dump holds nothing from (cluster/pods
+   * alone covers only the Istio namespace): not compared, so neither live nor stale.
+   */
+  unknown: string[];
 }
 
 const MAX_EXAMPLES = 5;
@@ -58,10 +62,6 @@ export const ISTIO_CR_KINDS = new Set([
   "WorkloadEntry", "WorkloadGroup", "PeerAuthentication", "RequestAuthentication",
   "AuthorizationPolicy", "Telemetry", "WasmPlugin", "ProxyConfig",
 ]);
-
-// DaemonSet pods: `<daemonset>-<5 char suffix>` (ControllerRevisions use a longer hash).
-const ZTUNNEL_POD_RE = /^ztunnel-[a-z0-9]{5}$/;
-const CNI_POD_RE = /^istio-cni-node-[a-z0-9]{5}$/;
 
 const LOG_PROBLEMS: { kind: string; re: RegExp }[] = [
   { kind: "auth", re: /\b(Unauthorized|Forbidden)\b|\b40[13]\b/i },
@@ -90,27 +90,18 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-/** Live pods, from the parsed dump when available, else from a `name:` scan of the pod dumps. */
-export interface PodNames {
-  /** False when no pod dump exists, so nothing can be compared. */
-  available: boolean;
-  /** Whether a proxy/istiod pod name is known to the cluster dump. */
-  has(namespace: string, pod: string): boolean;
-  /** ztunnel and istio-cni-node pod names seen in the dump. */
-  daemonPods: Set<string>;
-}
-
-export function computeCompleteness(store: BugReportStore, pods: PodNames): Completeness {
+export function computeCompleteness(store: BugReportStore, pods: PodInventory): Completeness {
+  const stale = findStaleProxyDirs(store, pods);
   const signals = [
     versionsSignal(store),
     clusterDumpSignal(store),
     crsSignal(store),
     istiodDebugSignal(store),
-    configDumpSignal(store),
-    daemonLogsSignal(store, pods),
+    configDumpSignal(store, stale),
+    daemonLogsSignal(store, pods, stale),
     bugReportLogSignal(store),
     clientSignal(store),
-    staleSignal(store, pods),
+    staleSignal(store, stale),
   ];
   return { verdict: signals.every((s) => s.status === "ok") ? "complete" : "incomplete", signals };
 }
@@ -192,22 +183,34 @@ function istiodDebugSignal(store: BugReportStore): CompletenessSignal {
   return signal("istiod-debug", "ok", `debug endpoints from ${plural(withDebug.length, "istiod pod")}`, details);
 }
 
-function configDumpSignal(store: BugReportStore): CompletenessSignal {
-  const proxies = store.getProxyPods();
+/** Proxy dirs whose pod is still in the cluster dump (or cannot be checked): stale dirs are counted once, by staleSignal. */
+function liveProxyDirs(store: BugReportStore, stale: StaleProxyDirs) {
+  const gone = new Set(stale.stale);
+  return store.getProxyPods().filter((p) => !gone.has(podKey(p.namespace, p.podName)));
+}
+
+function configDumpSignal(store: BugReportStore, stale: StaleProxyDirs): CompletenessSignal {
+  const proxies = liveProxyDirs(store, stale);
   const missing = proxies
     .filter((p) => !(store.getProxySections(p.namespace, p.podName) ?? []).includes("config_dump"))
     .map((p) => `${p.namespace}/${p.podName}`);
-  if (missing.length === 0) return signal("proxy-config-dump", "ok", `every proxy dir (${proxies.length}) has a config_dump`);
-  return signal("proxy-config-dump", "gap", `${missing.length} of ${plural(proxies.length, "proxy dir")} have no config_dump`, examples(missing));
+  if (missing.length === 0) return signal("proxy-config-dump", "ok", `every live proxy dir (${proxies.length}) has a config_dump`);
+  return signal("proxy-config-dump", "gap", `${missing.length} of ${plural(proxies.length, "live proxy dir")} have no config_dump`, examples(missing));
 }
 
-function daemonLogsSignal(store: BugReportStore, pods: PodNames): CompletenessSignal {
-  const noLogs: string[] = [];
+/**
+ * ztunnel and istio-cni pods of the cluster dump whose logs were not collected. A collected
+ * dir with an empty or no log is not a gap: istioctl skips a log with no lines in its time
+ * window. Dirs of pods gone from the dump are left to staleSignal.
+ */
+function daemonLogsSignal(store: BugReportStore, pods: PodInventory, stale: StaleProxyDirs): CompletenessSignal {
+  const gone = new Set(stale.stale);
+  const emptyLogs: string[] = [];
   const ztunnelDirs = new Set<string>();
   for (const p of store.getProxyPods()) {
-    if (!p.podName.startsWith("ztunnel-")) continue;
+    if (!p.podName.startsWith("ztunnel-") || gone.has(podKey(p.namespace, p.podName))) continue;
     ztunnelDirs.add(p.podName);
-    if (!(store.getFileSize(`proxies/${p.namespace}/${p.podName}/istio-proxy.log`) ?? 0)) noLogs.push(`${p.namespace}/${p.podName} (ztunnel)`);
+    if (!(store.getFileSize(`proxies/${p.namespace}/${p.podName}/istio-proxy.log`) ?? 0)) emptyLogs.push(`${p.namespace}/${p.podName} (ztunnel)`);
   }
   const cniDirs = new Set<string>();
   for (const f of store.getAllFiles()) {
@@ -215,15 +218,20 @@ function daemonLogsSignal(store: BugReportStore, pods: PodNames): CompletenessSi
     if (parts[0] === "cni" && parts.length >= 3) cniDirs.add(parts[1]);
   }
   for (const pod of cniDirs) {
-    if (!(store.getFileSize(`cni/${pod}/cni.log`) ?? 0)) noLogs.push(`${pod} (CNI)`);
+    if (!(store.getFileSize(`cni/${pod}/cni.log`) ?? 0)) emptyLogs.push(`${pod} (CNI)`);
   }
-  for (const pod of pods.daemonPods) {
-    if (ZTUNNEL_POD_RE.test(pod) && !ztunnelDirs.has(pod)) noLogs.push(`${pod} (ztunnel, in cluster dump, not collected)`);
-    if (CNI_POD_RE.test(pod) && !cniDirs.has(pod)) noLogs.push(`${pod} (CNI, in cluster dump, not collected)`);
+  const live = [...pods.pods.values()].filter((p) => p.daemon && isLive(p));
+  const notCollected = live
+    .filter((p) => !(p.daemon === "ztunnel" ? ztunnelDirs : cniDirs).has(p.name))
+    .map((p) => `${p.namespace}/${p.name} (${p.daemon === "ztunnel" ? "ztunnel" : "CNI"}, in cluster dump, not collected)`);
+  const emptyNote = emptyLogs.length > 0
+    ? [`${plural(emptyLogs.length, "collected dir")} with an empty or no log (istioctl skips logs with no lines in its time window): ${examples(emptyLogs).join(", ")}`]
+    : [];
+  if (notCollected.length > 0) {
+    return signal("ztunnel-cni-logs", "gap", `${notCollected.length} of ${plural(live.length, "ztunnel/CNI pod")} in the cluster dump have no logs collected`, [...examples(notCollected), ...emptyNote]);
   }
-  if (noLogs.length > 0) return signal("ztunnel-cni-logs", "gap", `${plural(noLogs.length, "ztunnel/CNI pod")} without logs`, examples(noLogs));
-  if (ztunnelDirs.size + cniDirs.size === 0) return signal("ztunnel-cni-logs", "ok", "no ztunnel or CNI pods");
-  return signal("ztunnel-cni-logs", "ok", `logs for ${ztunnelDirs.size} ztunnel and ${cniDirs.size} CNI pods`);
+  if (ztunnelDirs.size + cniDirs.size + live.length === 0) return signal("ztunnel-cni-logs", "ok", "no ztunnel or CNI pods");
+  return signal("ztunnel-cni-logs", "ok", `logs for ${ztunnelDirs.size} ztunnel and ${cniDirs.size} CNI pods`, emptyNote);
 }
 
 function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
@@ -279,28 +287,39 @@ function clientSignal(store: BugReportStore): CompletenessSignal {
   return signal("istioctl-client", "ok", `istioctl ${versions.clientVersion} is not older than the control plane`);
 }
 
-export function findStaleProxyDirs(store: BugReportStore, pods: PodNames): StaleProxyDirs {
+export function findStaleProxyDirs(store: BugReportStore, pods: PodInventory): StaleProxyDirs {
   const proxies = store.getProxyPods();
-  if (proxies.length === 0) return { evaluated: true, stale: [] };
-  if (!pods.available) return { evaluated: false, stale: [] };
-  const stale = proxies
-    .filter((p) => !pods.has(p.namespace, p.podName))
-    .map((p) => `${p.namespace}/${p.podName}`);
-  return { evaluated: true, stale };
+  if (proxies.length === 0) return { evaluated: true, stale: [], unknown: [] };
+  if (!pods.available) return { evaluated: false, stale: [], unknown: [] };
+  const stale: string[] = [];
+  const unknown: string[] = [];
+  for (const p of proxies) {
+    const key = podKey(p.namespace, p.podName);
+    const pod = pods.pods.get(key);
+    if (pod && isLive(pod)) continue;
+    (pod || pods.namespaces.has(p.namespace) ? stale : unknown).push(key);
+  }
+  return { evaluated: true, stale, unknown };
 }
 
-function staleSignal(store: BugReportStore, pods: PodNames): CompletenessSignal {
-  const { evaluated, stale } = findStaleProxyDirs(store, pods);
+function staleSignal(store: BugReportStore, dirs: StaleProxyDirs): CompletenessSignal {
+  const { evaluated, stale, unknown } = dirs;
   if (!evaluated) return signal("stale-proxy-dirs", "not_evaluated", "no pod list in the cluster dump to compare proxy dirs against");
+  const total = store.getProxyPods().length;
+  if (total === 0) return signal("stale-proxy-dirs", "ok", "no proxy dirs");
+  const compared = total - unknown.length;
+  const unknownNote = unknown.length > 0
+    ? [`${unknown.length} of ${plural(total, "proxy dir")} are in namespaces the pod dump does not cover (without cluster/k8s-resources, cluster/pods holds only the Istio namespace), so they were not compared: ${examples(unknown).join(", ")}`]
+    : [];
+  if (compared === 0) return signal("stale-proxy-dirs", "not_evaluated", "the pod dump covers none of the proxy dirs' namespaces", unknownNote);
   const span = collectionSpanMs(store);
   const spanNote = span >= MIN_REPORTED_SPAN_MS ? [`files were written over ~${(span / 3.6e6).toFixed(1)} h (from file times), so pods may have been replaced during collection`] : [];
-  const total = store.getProxyPods().length;
-  if (stale.length === 0) return signal("stale-proxy-dirs", "ok", `every proxy dir (${total}) has a live pod`, spanNote);
+  if (stale.length === 0) return signal("stale-proxy-dirs", "ok", `every compared proxy dir (${compared}) has a live pod`, [...unknownNote, ...spanNote]);
   return signal(
     "stale-proxy-dirs",
     "gap",
-    `${stale.length} of ${plural(total, "proxy dir")} have no live pod in the cluster dump: proxy counts include pods that no longer exist`,
-    [...spanNote, ...examples(stale)],
+    `${stale.length} of ${plural(compared, "proxy dir")} have no live pod in the cluster dump: proxy counts include pods that no longer exist`,
+    [...spanNote, ...examples(stale), ...unknownNote],
   );
 }
 
@@ -314,62 +333,6 @@ function collectionSpanMs(store: BugReportStore): number {
     if (t > max) max = t;
   }
   return max > min ? max - min : 0;
-}
-
-const NAME_LINE_RE = /^\s*(?:-\s*)?"?name"?\s*:\s*"?([A-Za-z0-9][A-Za-z0-9.-]*)"?\s*,?\s*$/;
-const KIND_POD_RE = /^\s*(?:-\s*)?"?kind"?\s*:\s*"?Pod"?\s*,?\s*$/;
-const SCAN_CHUNK = 1 << 20;
-
-/**
- * Pod names from the pod dumps without parsing them: every `name:` value is checked
- * against the proxy pod names (exact, hash-suffixed, so a hit anywhere — the Pod or an
- * Endpoints targetRef — means the pod exists) and the ztunnel/CNI DaemonSet pod pattern.
- * Streams 1 MB chunks, so dumps of any size are read in bounded memory.
- */
-export interface PodNameScan {
-  found: Set<string>;
-  daemonPods: Set<string>;
-  /** Whether any `kind: Pod` line was seen, i.e. the dumps hold a pod list at all. */
-  sawPod: boolean;
-}
-
-export function scanPodNames(paths: string[], candidates: Set<string>): PodNameScan {
-  const found = new Set<string>();
-  const daemonPods = new Set<string>();
-  let sawPod = false;
-  const onLine = (line: string) => {
-    if (!sawPod && KIND_POD_RE.test(line)) sawPod = true;
-    if (!line.includes("name")) return; // most lines; much cheaper than the regex
-    const m = NAME_LINE_RE.exec(line);
-    if (!m) return;
-    if (candidates.has(m[1])) found.add(m[1]);
-    if (ZTUNNEL_POD_RE.test(m[1]) || CNI_POD_RE.test(m[1])) daemonPods.add(m[1]);
-  };
-  for (const path of paths) {
-    let fd: number;
-    try {
-      fd = openSync(path, "r");
-    } catch {
-      continue;
-    }
-    try {
-      const buf = Buffer.alloc(SCAN_CHUNK);
-      const decoder = new StringDecoder("utf8");
-      let rest = "";
-      let n: number;
-      while ((n = readSync(fd, buf, 0, SCAN_CHUNK, null)) > 0) {
-        const lines = (rest + decoder.write(buf.subarray(0, n))).split("\n");
-        rest = lines.pop() ?? "";
-        // A line longer than a chunk is not a `name:` line; drop it instead of growing.
-        if (rest.length > SCAN_CHUNK) rest = "";
-        for (const line of lines) onLine(line);
-      }
-      onLine(rest + decoder.end());
-    } finally {
-      closeSync(fd);
-    }
-  }
-  return { found, daemonPods, sawPod };
 }
 
 const LABELS: Record<CompletenessStatus, string> = { ok: "ok", gap: "missing", not_evaluated: "not evaluated" };

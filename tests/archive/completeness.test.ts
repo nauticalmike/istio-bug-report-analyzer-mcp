@@ -90,28 +90,43 @@ describe("data completeness verdict", () => {
     expect(s.details.join("\n")).toContain("default/test-pod-abc123");
   });
 
-  it("flags ztunnel and CNI pods without logs", async () => {
-    const zt = join(dir, "proxies", "istio-system", "ztunnel-ab12c");
+  it("notes collected ztunnel and CNI dirs with an empty log without calling them missing", async () => {
+    const zt = join(dir, "proxies", "istio-system", "ztunnel-bc2d4");
     await mkdir(zt, { recursive: true });
     await writeFile(join(zt, "config_dump"), JSON.stringify({ workloads: [] }));
-    await appendFile(join(dir, "cluster", "pods"), "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ztunnel-ab12c\n  namespace: istio-system\n");
-    expect((await signal("ztunnel-cni-logs")).status).toBe("gap");
-
-    await writeFile(join(zt, "istio-proxy.log"), "2026-03-18T10:00:00Z\tinfo\tztunnel started\n");
-    expect((await signal("ztunnel-cni-logs")).status).toBe("ok");
-
+    await appendFile(join(dir, "cluster", "pods"), "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ztunnel-bc2d4\n  namespace: istio-system\n");
     await mkdir(join(dir, "cni", "istio-cni-node-x7k2p"), { recursive: true });
     await writeFile(join(dir, "cni", "istio-cni-node-x7k2p", "cni.log"), "");
     const s = await signal("ztunnel-cni-logs");
+    // istioctl skips a log with no lines in its time window: the pod was collected.
+    expect(s.status).toBe("ok");
+    expect(s.details.join("\n")).toMatch(/2 collected dirs with an empty or no log.*ztunnel-bc2d4.*istio-cni-node-x7k2p/);
+  });
+
+  it("flags a ztunnel pod in the cluster dump with no dir collected", async () => {
+    await appendFile(join(dir, "cluster", "pods"), "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ztunnel-bc2d4\n  namespace: istio-system\n");
+    const s = await signal("ztunnel-cni-logs");
     expect(s.status).toBe("gap");
-    expect(s.details.join("\n")).toContain("istio-cni-node-x7k2p");
+    expect(s.details.join("\n")).toContain("istio-system/ztunnel-bc2d4 (ztunnel, in cluster dump, not collected)");
+  });
+
+  it("does not take non-pod objects or names outside the Kubernetes suffix alphabet as ztunnel/CNI pods", async () => {
+    await appendFile(
+      join(dir, "cluster", "pods"),
+      [
+        "---\napiVersion: v1\nkind: Event\nmetadata:\n  name: ztunnel-bc2d4\n  namespace: istio-system\n",
+        "---\napiVersion: v1\nkind: Service\nmetadata:\n  name: istio-cni-node-x7k2p\n  namespace: kube-system\n",
+        "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ztunnel-aeiou\n  namespace: istio-system\n",
+      ].join(""),
+    );
+    expect((await signal("ztunnel-cni-logs")).status).toBe("ok");
   });
 
   it("flags a CNI pod in the cluster dump whose logs were not collected", async () => {
-    await appendFile(join(dir, "cluster", "pods"), "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: istio-cni-node-q9w8e\n  namespace: kube-system\n");
+    await appendFile(join(dir, "cluster", "pods"), "---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: istio-cni-node-q9w8z\n  namespace: kube-system\n");
     const s = await signal("ztunnel-cni-logs");
     expect(s.status).toBe("gap");
-    expect(s.details.join("\n")).toContain("istio-cni-node-q9w8e");
+    expect(s.details.join("\n")).toContain("istio-cni-node-q9w8z");
   });
 
   for (const [kind, line] of [
@@ -165,7 +180,7 @@ describe("data completeness verdict", () => {
     const s = store.getCompletenessSignal("stale-proxy-dirs");
     expect(s.status).toBe("gap");
     expect(s.summary).toMatch(/1 of 2 proxy dirs/);
-    expect(store.getStaleProxyDirs()).toEqual({ evaluated: true, stale: ["default/old-pod-zzz99"] });
+    expect(store.getStaleProxyDirs()).toEqual({ evaluated: true, stale: ["default/old-pod-zzz99"], unknown: [] });
   });
 
   it("gives the same stale-dir answer before and after the cluster dump is parsed", async () => {
@@ -183,6 +198,36 @@ describe("data completeness verdict", () => {
     const s = await signal("stale-proxy-dirs");
     expect(s.status).toBe("gap");
     expect(s.summary).toMatch(/1 of 1 proxy dir/);
+  });
+
+  it("does not call proxy dirs stale in namespaces a partial pod dump does not cover", async () => {
+    // No cluster/k8s-resources: cluster/pods holds only the Istio namespace.
+    await unlink(join(dir, "cluster", "k8s-resources"));
+    await writeFile(join(dir, "cluster", "pods"), "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\n");
+    const gw = join(dir, "proxies", "istio-system", "old-gateway-zzz99");
+    await mkdir(gw, { recursive: true });
+    await writeFile(join(gw, "config_dump?include_eds"), "{}");
+    const store = await load();
+    expect(store.getStaleProxyDirs()).toEqual({ evaluated: true, stale: ["istio-system/old-gateway-zzz99"], unknown: ["default/test-pod-abc123"] });
+    const s = store.getCompletenessSignal("stale-proxy-dirs");
+    expect(s.summary).toMatch(/^1 of 1 proxy dir have no live pod/);
+    expect(s.details.join("\n")).toMatch(/1 of 2 proxy dirs are in namespaces the pod dump does not cover/);
+  });
+
+  it("reports the stale-dir check as not evaluated when the pod dump covers none of the proxy namespaces", async () => {
+    await unlink(join(dir, "cluster", "k8s-resources"));
+    await writeFile(join(dir, "cluster", "pods"), "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\n");
+    expect((await signal("stale-proxy-dirs")).status).toBe("not_evaluated");
+  });
+
+  it("counts a stale proxy dir only as stale, not also as a missing config_dump or log", async () => {
+    const stale = join(dir, "proxies", "istio-system", "ztunnel-zzz99");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "istio-proxy.log"), "");
+    const store = await load();
+    expect(store.getCompletenessSignal("stale-proxy-dirs").status).toBe("gap");
+    expect(store.getCompletenessSignal("proxy-config-dump").status).toBe("ok");
+    expect(store.getCompletenessSignal("ztunnel-cni-logs").details.join("\n")).not.toContain("ztunnel-zzz99");
   });
 
   it("passes the stale-dir check for an archive with no proxy dirs", async () => {

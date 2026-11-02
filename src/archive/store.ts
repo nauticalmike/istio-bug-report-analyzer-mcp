@@ -6,14 +6,12 @@ import {
   POD_DUMP_FILES,
   computeCompleteness,
   findStaleProxyDirs,
-  scanPodNames,
   type Completeness,
   type CompletenessSignal,
   type CompletenessSignalId,
-  type PodNames,
-  type PodNameScan,
   type StaleProxyDirs,
 } from "./completeness.js";
+import { scanPodInventory, type PodInventory } from "./pod-inventory.js";
 import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
 import { MAX_STRING_BYTES, extractNamespaceResourcesFromFile, parseClusterDumpFile, scanClusterDumpItems, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
@@ -192,8 +190,8 @@ export class BugReportStore {
   private captureInfo: { time: Date; source: CaptureSource } | null | undefined = undefined;
   private dumpItemCounts = new Map<string, number>();
   private fileEntries = new Map<string, FileEntry>();
-  private scannedPodNames: PodNameScan | null = null;
-  private cachedCompleteness: { parsed: boolean; value: Completeness } | null = null;
+  private podInventory: PodInventory | null = null;
+  private cachedCompleteness: Completeness | null = null;
   private collectionScan: CollectionScan | null = null;
 
   private constructor(index: ArchiveIndex) {
@@ -631,44 +629,28 @@ export class BugReportStore {
   }
 
   /**
-   * Live pods to compare proxy dirs against: the parsed Pods once the cluster dump is
-   * parsed, else a `name:` scan of the pod dumps (no YAML parse, so it is cheap at load).
+   * The pods of the pod dumps (cluster/k8s-resources, cluster/pods), from one streaming item
+   * scan that never depends on the full parse, so every tool sees the same pod list.
    */
-  private podNames(): PodNames {
-    const dumps = POD_DUMP_FILES.filter((f) => this.pathIndex.has(f));
-    if (this.clusterResources) {
-      const pods = this.clusterResources.filter((r) => r.kind === "Pod");
-      const keys = new Set(pods.map((p) => `${p.metadata?.namespace ?? ""}/${p.metadata?.name ?? ""}`));
-      return {
-        available: pods.length > 0,
-        has: (ns, pod) => keys.has(`${ns}/${pod}`),
-        daemonPods: new Set(pods.map((p) => p.metadata?.name ?? "")),
-      };
-    }
-    if (!this.scannedPodNames) {
-      const candidates = new Set(this.getProxyPods().map((p) => p.podName));
-      this.scannedPodNames = scanPodNames(dumps.map((f) => this.pathIndex.get(f)!), candidates);
-    }
-    const { found, daemonPods, sawPod } = this.scannedPodNames;
-    return {
-      available: sawPod,
-      has: (_ns, pod) => found.has(pod),
-      daemonPods,
-    };
+  getPodInventory(): PodInventory {
+    this.podInventory ??= scanPodInventory(
+      POD_DUMP_FILES.filter((f) => this.pathIndex.has(f)).map((relativePath) => ({ relativePath, absolutePath: this.pathIndex.get(relativePath)! })),
+    );
+    return this.podInventory;
   }
 
   /**
-   * The data-completeness verdict (see completeness.ts). Computed from the file index,
-   * bounded reads and the load-time bug-report.log scan; recomputed once after the cluster
-   * dump is parsed, which makes the stale-dir check exact.
+   * The data-completeness verdict (see completeness.ts), computed once from the file index,
+   * bounded reads, the load-time bug-report.log scan and the pod inventory, so
+   * load_bug_report, get_overview and run_diagnostics print the same verdict.
    */
   getCompleteness(): Completeness {
-    if (this.cachedCompleteness?.parsed !== this.isClusterResourcesParsed()) {
-      const value = computeCompleteness(this, this.podNames());
-      // Keyed after computing: the versions check can parse the pod dump (image-tag fallback).
-      this.cachedCompleteness = { parsed: this.isClusterResourcesParsed(), value };
+    if (!this.cachedCompleteness) {
+      // First: the versions check can parse the pod dump (image-tag fallback).
+      this.getEffectiveVersions();
+      this.cachedCompleteness = computeCompleteness(this, this.getPodInventory());
     }
-    return this.cachedCompleteness.value;
+    return this.cachedCompleteness;
   }
 
   /** One completeness signal by id, e.g. to ask whether cluster/crs was collected. */
@@ -678,7 +660,7 @@ export class BugReportStore {
 
   /** Proxy dirs whose pod is not in the cluster dump (pods gone by the time it was taken). */
   getStaleProxyDirs(): StaleProxyDirs {
-    return findStaleProxyDirs(this, this.podNames());
+    return findStaleProxyDirs(this, this.getPodInventory());
   }
 
   getAllFiles(): string[] {
