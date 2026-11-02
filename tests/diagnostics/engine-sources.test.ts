@@ -63,6 +63,17 @@ describe("engine signal sources in multi-revision archives", () => {
     expect(meshConfig(await BugReportStore.fromDirectory(dir))?.rootNamespace).toBe("istio-system");
   });
 
+  it("istiod signals read the busiest istiod's endpoint even when its value is empty, never an idle one", async () => {
+    const dir = await archive();
+    await rm(join(dir, "istio", "istio-system", "istiod-abc"), { recursive: true });
+    await istiod(dir, "istiod-1-30-aaaaa", { syncz: [], mesh: { rootNamespace: "idle-root" } });
+    await istiod(dir, "istiod-1-31-bbbbb", { syncz: syncz(3) });
+    // Collected but empty on the busiest istiod.
+    await writeFile(join(dir, "istio", "istio-system", "istiod-1-31-bbbbb", "debug", "mesh"), "");
+    const signal: Signal = { source: { type: "istiod", endpoint: "mesh", path: "rootNamespace" }, check: { op: "equals", value: "idle-root" } };
+    expect(await fires(dir, signal)).toBe(false);
+  });
+
   it("log counts cover every matching file, not just the first", async () => {
     const dir = await archive();
     const second = join(dir, "proxies", "shop", "cart-7d9-xyz12");

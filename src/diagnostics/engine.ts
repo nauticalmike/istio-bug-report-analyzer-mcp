@@ -261,8 +261,10 @@ export class DiagnosticEngine {
       }
       case "istiod": {
         // The istiod serving the most proxies that has the endpoint: in multi-revision
-        // archives the first one listed can be an idle revision.
-        const pod = istiodsByLoad(store).find((p) => p.debugEndpoints.get(source.endpoint));
+        // archives the first one listed can be an idle revision. Chosen by `has`, the same
+        // pod missingInput checks, so an empty or unreadable endpoint on it does not fall
+        // through to an idle istiod's value.
+        const pod = istiodsByLoad(store).find((p) => p.debugEndpoints.has(source.endpoint));
         if (!pod) return null;
         const data = pod.debugEndpoints.get(source.endpoint);
         return source.path ? getNestedValue(data, source.path) : data;
