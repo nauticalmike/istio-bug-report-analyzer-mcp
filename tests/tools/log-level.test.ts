@@ -12,6 +12,7 @@ describe("logLevel", () => {
     ["[2026-10-20 20:22:25.123][15][critical][main] [source/server/server.cc:100] error initializing", "error"],
     ['{"level":"error","time":"2026-10-20T20:22:25Z","msg":"boom"}', "error"],
     ['{"level":"warn","msg":"slow"}', "warn"],
+    ['  {"level":"error","msg":"indented JSON line"}', "error"],
     ["E1020 20:23:09.123456       1 reflector.go:150] failed to list", "error"],
     ["W1020 20:23:09.123456       1 warnings.go:70] deprecated", "warn"],
     ["panic: runtime error: invalid memory address", "error"],
@@ -25,6 +26,9 @@ describe("logLevel", () => {
     "  try_tcp_on_error: false",
     '[2026-10-20T20:22:30.000Z] "GET /status/500 HTTP/1.1" 500 - via_upstream - "-" 0 0 1 0',
     "2026-10-20T20:21:49.802224Z\tinfo\twatch error resolved",
+    // A debug print that embeds a JSON object is not a JSON log line.
+    'debug: fetched config {"level":"error","name":"logging"}',
+    'proxy config: map[logging:{"level":"warn"}]',
   ])("does not flag %j", (line) => {
     expect(logLevel(line)).toBeNull();
   });

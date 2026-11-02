@@ -26,7 +26,8 @@ export function logLevel(line: string): LogLevel | null {
   if (istio) return classify(istio[1]);
   const envoy = ENVOY_RE.exec(line);
   if (envoy) return classify(envoy[1]);
-  const json = JSON_RE.exec(line);
+  // Only a JSON log line: a "level" key inside a debug print or an embedded object is not one.
+  const json = line.trimStart().startsWith("{") ? JSON_RE.exec(line) : null;
   if (json) return classify(json[1]);
   const klog = KLOG_RE.exec(line);
   if (klog) return klog[1] === "W" ? "warn" : "error";
