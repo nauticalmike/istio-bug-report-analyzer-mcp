@@ -2,6 +2,7 @@ import { closeSync, openSync, readSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { clientBehindControlPlane, parseMinor } from "../diagnostics/versions.js";
 import type { BugReportStore } from "./store.js";
+import { MAX_COLLECTION_ISSUES } from "../tools/collection-issues.js";
 
 /**
  * Data-completeness signals: what an archive is missing, so that output built on the
@@ -240,15 +241,18 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
       else hits.set(kind, { count: issue.count, example: text.slice(0, 200) });
     }
   }
+  const overflow = scan.overflowLines ?? 0;
+  const overflowNote = `${overflow} line(s) past the first ${MAX_COLLECTION_ISSUES} distinct issues were not checked`;
   if (hits.size > 0) {
     const kinds = [...hits].map(([kind, h]) => `${kind} x${h.count}`).join(", ");
     return signal(
       "bug-report-log",
       "gap",
       `${file} has collection errors (${kinds}): some data may not have been fetched`,
-      [...hits].map(([kind, h]) => `${kind}: ${h.example}`),
+      [...[...hits].map(([kind, h]) => `${kind}: ${h.example}`), ...(overflow > 0 ? [overflowNote] : [])],
     );
   }
+  if (overflow > 0) return signal("bug-report-log", "not_evaluated", `${file}: no auth/404/timeout errors in the issues kept, but ${overflowNote}`);
   return signal("bug-report-log", "ok", `no auth/404/timeout errors in ${file}`);
 }
 

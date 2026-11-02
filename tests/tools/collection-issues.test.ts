@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { BugReportStore } from "../../src/archive/store.js";
-import { formatCollectionIssues, parseCollectionIssues, getCollectionIssues } from "../../src/tools/collection-issues.js";
+import { CollectionIssueCollector, MAX_COLLECTION_ISSUES, formatCollectionIssues, parseCollectionIssues, getCollectionIssues } from "../../src/tools/collection-issues.js";
 import { loadBugReport } from "../../src/tools/load.js";
 import { getOverview } from "../../src/tools/overview.js";
 import { getIstiodDebug } from "../../src/tools/istiod-debug.js";
@@ -129,6 +129,32 @@ describe("parseCollectionIssues port variants", () => {
   it("keeps messages that differ in more than ports apart", () => {
     const issues = parseCollectionIssues([portForward(30000), portForward(30001).replace("istiod-abc", "istiod-def")].join("\n"));
     expect(issues).toHaveLength(2);
+  });
+});
+
+describe("CollectionIssueCollector distinct-issue cap", () => {
+  const unique = (i: number) => `2026-10-20T20:23:09.000000Z\twarn\tunique warning number ${i} for resource r${i}`;
+
+  it(`keeps at most ${MAX_COLLECTION_ISSUES} distinct issues and counts the lines past the cap`, () => {
+    const c = new CollectionIssueCollector();
+    for (let i = 0; i < MAX_COLLECTION_ISSUES + 1000; i++) c.add(unique(i));
+    // A line of an issue already kept still counts there, past the cap.
+    c.add(unique(0));
+    const issues = c.issues();
+    expect(issues).toHaveLength(MAX_COLLECTION_ISSUES);
+    expect(issues[0].count).toBe(2);
+    expect(c.overflowLines).toBe(1000);
+  });
+
+  it("says in tool output that lines past the cap were not grouped", () => {
+    const text = formatCollectionIssues([{ level: "warn", message: "x", count: 1 }], 1234).join("\n");
+    expect(text).toContain("1234 more line(s) with further distinct messages");
+  });
+
+  it("still counts port variants past the first issue without keeping each text", () => {
+    const c = new CollectionIssueCollector();
+    for (let p = 30000; p < 30020; p++) c.add(`2026-10-20T20:23:09.000000Z\terror\tbind 127.0.0.1:${p}: address already in use`);
+    expect(c.issues()[0]).toMatchObject({ count: 20, variants: 20 });
   });
 });
 

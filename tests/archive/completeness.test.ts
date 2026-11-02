@@ -127,6 +127,14 @@ describe("data completeness verdict", () => {
     });
   }
 
+  it("does not call bug-report.log clean when lines past the distinct-issue cap were not checked", async () => {
+    const lines = Array.from({ length: 5100 }, (_, i) => `2026-03-18T10:00:00.000Z\twarn\tunique warning w${i}`);
+    await writeFile(join(dir, "bug-report.log"), lines.join("\n") + "\n");
+    const s = await signal("bug-report-log");
+    expect(s.status).toBe("not_evaluated");
+    expect(s.summary).toContain("100 line(s)");
+  });
+
   it("does not flag info lines that merely mention a timeout setting", async () => {
     await writeFile(join(dir, "bug-report.log"), "2026-03-18T10:00:00.000Z\tinfo\tusing --timeout=30m\n");
     expect((await signal("bug-report-log")).status).toBe("ok");

@@ -19,7 +19,13 @@ const MAX_MESSAGE_CHARS = 300;
 const MAX_LISTED = 10;
 const MAX_DETAILS = 10;
 /** Distinct port variants remembered per issue; beyond this the count stops growing. */
-const MAX_VARIANTS = 10_000;
+const MAX_VARIANTS = 1_000;
+/**
+ * Distinct issues kept; lines that would start another are only counted (overflowLines).
+ * A log of unique warnings would otherwise keep every line, and it can be several GB.
+ */
+export const MAX_COLLECTION_ISSUES = 5_000;
+const PORTS_RE = /(?<=[\w\]]):\d{2,5}\b/g;
 const ISTIO_PREFIX_RE = /^\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?\s+[A-Za-z]+\s+/;
 const COBRA_ERROR_RE = /^Error:\s*(.+)$/;
 // Istio's log rate limiter collapses duplicates into one line with this suffix.
@@ -45,8 +51,11 @@ interface PendingIssue {
  */
 export class CollectionIssueCollector {
   private readonly byKey = new Map<string, CollectionIssue>();
+  /** Per issue, the port sequences seen (a variant differs from the issue only in its ports). */
   private readonly variantsByKey = new Map<string, Set<string>>();
   private pending: PendingIssue | null = null;
+  /** Lines (with their repeat counts) of issues not kept because MAX_COLLECTION_ISSUES was reached. */
+  overflowLines = 0;
 
   add(raw: string): void {
     const untrimmed = raw.replace(/\r$/, "");
@@ -104,22 +113,34 @@ export class CollectionIssueCollector {
   private record(level: LogLevel, message: string, occurrences: number, details: string[] = [], moreDetails = 0): void {
     const text = [message, ...details].join("\n");
     const key = normalizePorts(text);
+    const ports = (text.match(PORTS_RE) ?? []).join("");
     const existing = this.byKey.get(key);
     if (!existing) {
-      const issue: CollectionIssue = { level, message, count: occurrences };
-      if (details.length > 0) issue.details = details;
+      if (this.byKey.size >= MAX_COLLECTION_ISSUES) {
+        this.overflowLines += occurrences;
+        return;
+      }
+      // Copies, so a kept message does not pin the (up to 1 MiB) line it was sliced from.
+      const issue: CollectionIssue = { level, message: flat(message), count: occurrences };
+      if (details.length > 0) issue.details = details.map(flat);
       if (moreDetails > 0) issue.moreDetails = moreDetails;
-      this.byKey.set(key, issue);
-      this.variantsByKey.set(key, new Set([text]));
+      const kept = flat(key);
+      this.byKey.set(kept, issue);
+      this.variantsByKey.set(kept, new Set([ports]));
       return;
     }
     existing.count += occurrences;
     const variants = this.variantsByKey.get(key)!;
-    if (variants.size < MAX_VARIANTS && !variants.has(text)) {
-      variants.add(text);
+    if (variants.size < MAX_VARIANTS && !variants.has(ports)) {
+      variants.add(ports);
       existing.variants = variants.size;
     }
   }
+}
+
+/** A copy of `s` that shares no memory with the string it was sliced from. */
+function flat(s: string): string {
+  return Buffer.from(s, "utf8").toString("utf8");
 }
 
 export function parseCollectionIssues(content: string): CollectionIssue[] {
@@ -132,6 +153,8 @@ export function parseCollectionIssues(content: string): CollectionIssue[] {
 export interface CollectionScan {
   issues: CollectionIssue[];
   error?: string;
+  /** Lines not grouped because MAX_COLLECTION_ISSUES distinct issues were already kept. */
+  overflowLines?: number;
 }
 
 /**
@@ -146,7 +169,8 @@ export async function scanCollectionIssues(store: BugReportStore): Promise<Colle
   } catch (e) {
     return { issues: [], error: e instanceof Error ? e.message : String(e) };
   }
-  return { issues: collector.issues() };
+  const issues = collector.issues();
+  return collector.overflowLines > 0 ? { issues, overflowLines: collector.overflowLines } : { issues };
 }
 
 const cache = new WeakMap<BugReportStore, Promise<CollectionIssue[]>>();
@@ -165,8 +189,13 @@ export function getCollectionIssues(store: BugReportStore): Promise<CollectionIs
   return issues;
 }
 
-export function formatCollectionIssues(issues: CollectionIssue[]): string[] {
-  if (issues.length === 0) return [];
+/** Lines of bug-report.log past the distinct-issue cap, from the store's load-time scan. */
+export function getCollectionOverflow(store: BugReportStore): number {
+  return store.getCollectionScan()?.overflowLines ?? 0;
+}
+
+export function formatCollectionIssues(issues: CollectionIssue[], overflowLines = 0): string[] {
+  if (issues.length === 0 && overflowLines === 0) return [];
   const lines = [`Collection issues (${issues.length}) reported in bug-report.log:`];
   for (const issue of issues.slice(0, MAX_LISTED)) {
     const notes: string[] = [];
@@ -177,5 +206,8 @@ export function formatCollectionIssues(issues: CollectionIssue[]): string[] {
     if (issue.moreDetails) lines.push(`      * ... and ${issue.moreDetails} more`);
   }
   if (issues.length > MAX_LISTED) lines.push(`  ... and ${issues.length - MAX_LISTED} more (see get_raw_file bug-report.log)`);
+  if (overflowLines > 0) {
+    lines.push(`  ... and ${overflowLines} more line(s) with further distinct messages, not grouped: only the first ${MAX_COLLECTION_ISSUES} distinct issues are kept (see get_raw_file bug-report.log)`);
+  }
   return lines;
 }

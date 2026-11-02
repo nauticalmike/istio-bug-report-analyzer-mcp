@@ -12,7 +12,7 @@ import {
 } from "../archive/extraction.js";
 import { formatCompleteness } from "../archive/completeness.js";
 import type { Session } from "../types.js";
-import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
+import { formatCollectionIssues, getCollectionIssues, getCollectionOverflow } from "./collection-issues.js";
 import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
 import { versionSummaryLines } from "./overview.js";
 
@@ -134,7 +134,7 @@ export async function loadBugReport(
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
     ];
-    const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+    const issueLines = formatCollectionIssues(await getCollectionIssues(store), getCollectionOverflow(store));
     summary.push("", ...formatCompleteness(store.getCompleteness(), { collectionIssuesListed: issueLines.length > 0 }));
     // From file sizes, so a dump too large for the heap is reported now, not at the first
     // cluster tool; the parse's own warnings once the image-tag fallback has parsed the dumps.

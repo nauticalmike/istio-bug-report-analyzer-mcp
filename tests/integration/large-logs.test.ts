@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { spawnSync, execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ interface ChildResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   stderr: string;
-  out: { text?: string; issues?: { message: string }[]; maxRssMb: number };
+  out: { text?: string; issues?: { message: string }[]; issueCount?: number; overflowLines?: number; signal?: string; maxRssMb: number };
 }
 
 /**
@@ -42,6 +42,10 @@ async function buildChild(tempDir: string): Promise<string> {
     let out;
     if (op === "errors") out = { text: (await findErrors(store, arg ? JSON.parse(arg) : {})).content[0].text };
     else if (op === "issues") out = { issues: await getCollectionIssues(store) };
+    else if (op === "scan") {
+      const scan = store.getCollectionScan();
+      out = { issueCount: scan.issues.length, overflowLines: scan.overflowLines ?? 0, signal: store.getCompletenessSignal("bug-report-log").status };
+    }
     else if (op === "logs") out = { text: (await getLogs(store, JSON.parse(arg))).content[0].text };
     out.maxRssMb = Math.round(process.resourceUsage().maxRSS / 1024);
     console.log(JSON.stringify(out));
@@ -115,6 +119,54 @@ describe("log tools on logs larger than the heap", () => {
     expectOk(r);
     expect(r.out.text).toContain("SYNTHETIC-ISTIOD-ERROR");
     expect(r.out.text).toMatch(/=== Logs \(5 of \d+ lines\) ===/);
+  }, 180_000);
+});
+
+/** Writes `bytes` of warning lines that are all distinct, through one reused buffer. */
+async function writeUniqueWarnings(path: string, bytes: number): Promise<number> {
+  const handle = await open(path, "w");
+  let written = 0;
+  let i = 0;
+  try {
+    while (written < bytes) {
+      const lines: string[] = [];
+      for (let k = 0; k < 20_000; k++, i++) lines.push(`2026-01-01T00:00:00.000000Z\twarn\tSYNTHETIC-UNIQUE warning w${i} ${"x".repeat(200)} item${i}`);
+      const buf = Buffer.from(lines.join("\n") + "\n");
+      await handle.write(buf);
+      written += buf.length;
+    }
+  } finally {
+    await handle.close();
+  }
+  return i;
+}
+
+// Every line distinct: the collector must cap what it keeps, not grow with the log.
+describe("collection issues on a bug-report.log of distinct warnings", () => {
+  const HEAP_MB = 64;
+  let tempDir: string;
+  let archiveDir: string;
+  let script: string;
+  let lines: number;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "unique-warnings-test-"));
+    archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    lines = await writeUniqueWarnings(join(archiveDir, "bug-report.log"), 150 * MB);
+    script = await buildChild(tempDir);
+  }, 180_000);
+
+  afterAll(async () => {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it(`loads within a ${HEAP_MB}MB heap and reports the lines past the cap`, () => {
+    const r = runChild(script, [archiveDir, "scan"], HEAP_MB);
+    expectOk(r);
+    expect(r.out.issueCount).toBe(5000);
+    expect(r.out.overflowLines).toBe(lines - 5000);
+    expect(r.out.signal).toBe("not_evaluated");
   }, 180_000);
 });
 

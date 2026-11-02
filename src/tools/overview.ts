@@ -2,7 +2,7 @@ import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js
 import type { BugReportStore } from "../archive/store.js";
 import type { ComponentVersion, VersionInfo } from "../types.js";
 import { formatCompleteness } from "../archive/completeness.js";
-import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
+import { formatCollectionIssues, getCollectionIssues, getCollectionOverflow } from "./collection-issues.js";
 
 const fromImages = (used: boolean | undefined) => (used ? " [from pod image tags]" : "");
 
@@ -65,7 +65,7 @@ export async function getOverview(store: BugReportStore) {
     "",
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
   ];
-  const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+  const issueLines = formatCollectionIssues(await getCollectionIssues(store), getCollectionOverflow(store));
   lines.push("", ...formatCompleteness(store.getCompleteness(), { collectionIssuesListed: issueLines.length > 0 }));
   const warnings = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
   if (warnings.length > 0) lines.push("", ...warnings);
