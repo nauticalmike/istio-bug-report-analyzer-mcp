@@ -38,19 +38,29 @@ Then restart Claude Code to pick up the new skill.
 | Tool | Description |
 |------|-------------|
 | `collect_bug_report` | Run `istioctl bug-report` against a cluster and load results |
-| `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` |
-| `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop) and collection issues |
+| `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
+| `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop), collection issues and cluster dump size warnings |
 | `get_versions` | Version matrix with skew detection |
 | `get_analyze_results` | `istioctl analyze` results (IST codes), with a count per code; paged with `limit`/`offset` |
-| `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects |
-| `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel |
-| `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering |
-| `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected |
+| `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects; paged with `limit`/`offset` (`full: true` returns the objects as JSON) |
+| `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel; paged by character `offset` |
+| `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering; most recent lines by default, `offset` pages from the oldest |
+| `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected; paged by character `offset` |
 | `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive |
-| `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern |
+| `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern; paged with `limit`/`offset` |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
-| `list_files` | List all files in the archive |
-| `get_raw_file` | Read any file from the archive |
+| `list_files` | List all files in the archive; paged with `offset` |
+| `get_raw_file` | Read any file from the archive, of any size, by byte range (`offset`/`length`) |
+
+### Output size and paging
+
+Every tool keeps a response under about 100,000 characters (`OUTPUT_BUDGET_CHARS` in `src/tools/output-budget.ts`), since MCP clients reject or cut larger results. When there is more, the response ends with a footer such as:
+
+```
+Showing bytes 1-97984 of 412000000. Pass offset=97984 for more.
+```
+
+Call the tool again with that `offset` to get the next page. `get_raw_file` reads only the requested byte range, so files over Node's ~512 MiB string limit (for example `cluster/crs`) can be paged too; ranges end on a line boundary. `get_cluster_resources`, `find_errors`, `get_analyze_results` and `list_files` page over items, `get_proxy_config` and `get_istiod_debug` over characters, and `get_logs` over lines. Single log lines are cut at 2,000 characters (500 in `find_errors` samples).
 
 ## Usage with Claude Code
 
@@ -78,7 +88,7 @@ The tool extracts actual resource requests from Pod specs when available, fallin
 
 ## Large Bug Reports
 
-Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one List item at a time, so dumps larger than Node's ~512 MiB string limit load too. A parsed dump takes roughly 1.5–2.5× its file size in heap; on Node's default heap (~4 GB) up to about 1.2 GB of dumps in total load. If a dump would not fit, it is skipped and every tool that uses cluster data says so, with the `--max-old-space-size` value to restart with, for example:
+Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one List item at a time, so dumps larger than Node's ~512 MiB string limit load too. A parsed dump takes roughly 1.5–2.5× its file size in heap; on Node's default heap (~4 GB) up to about 1.2 GB of dumps in total load. If a dump would not fit, it is skipped and every tool that uses cluster data says so, with the `--max-old-space-size` value to restart with. The same check runs on file sizes alone when the archive is loaded, so `load_bug_report` and `get_overview` give the warning before any cluster tool runs, and note dumps over the string limit that will be parsed item by item. For example:
 
 ```json
 "env": { "NODE_OPTIONS": "--max-old-space-size=8192" }

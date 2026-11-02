@@ -1,6 +1,11 @@
 import type { BugReportStore } from "../archive/store.js";
 import { readFileComponentLogs } from "./component-logs.js";
 import { logLevel } from "./log-level.js";
+import { clampLine, fitItems, pageFooter, toOffset } from "./output-budget.js";
+
+const DEFAULT_LIMIT = 50;
+/** Pattern and example lines are cut to this; the full line is in get_logs. */
+const MAX_SAMPLE_CHARS = 500;
 
 interface ErrorGroup {
   pattern: string;
@@ -11,7 +16,7 @@ interface ErrorGroup {
 
 export async function findErrors(
   store: BugReportStore,
-  params: { severity?: string; component?: string; keyword?: string },
+  params: { severity?: string; component?: string; keyword?: string; limit?: number; offset?: number },
 ) {
   const errorLines: { component: string; line: string }[] = [];
 
@@ -79,23 +84,26 @@ export async function findErrors(
     return { content: [{ type: "text" as const, text: "No error/warning lines found." }] };
   }
 
-  const lines = [
-    `=== ${sorted.length} unique error patterns found (${filtered.length} total lines) ===`,
+  const header = `=== ${sorted.length} unique error patterns found (${filtered.length} total lines) ===`;
+  const limit = Math.max(1, params.limit ?? DEFAULT_LIMIT);
+  const offset = toOffset(params.offset);
+  if (offset >= sorted.length) {
+    return { content: [{ type: "text" as const, text: `${header}\n\nNo patterns at offset ${offset}.` }] };
+  }
+
+  // Log lines can be megabytes (config dumps logged inline), so each is clamped before it counts against the budget.
+  const blocks = sorted.slice(offset, offset + limit).map((group) => [
+    `[x${group.count}] ${group.component}`,
+    `  Pattern: ${clampLine(group.pattern, MAX_SAMPLE_CHARS)}`,
+    `  Example: ${clampLine(group.examples[0], MAX_SAMPLE_CHARS)}`,
     "",
-  ];
+  ].join("\n"));
+  const { taken, budgetHit } = fitItems(blocks);
+  const end = offset + taken.length;
 
-  for (const group of sorted.slice(0, 50)) {
-    lines.push(
-      `[x${group.count}] ${group.component}`,
-      `  Pattern: ${group.pattern}`,
-      `  Example: ${group.examples[0]}`,
-      "",
-    );
-  }
-
-  if (sorted.length > 50) {
-    lines.push(`(${sorted.length - 50} more patterns omitted)`);
-  }
+  const lines = [header, "", ...taken];
+  const footer = pageFooter(offset, end, sorted.length, { unit: "patterns", hint: "or filter by component/keyword", budgetHit });
+  if (footer) lines.push(footer);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
 }

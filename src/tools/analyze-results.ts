@@ -1,4 +1,5 @@
 import type { BugReportStore } from "../archive/store.js";
+import { CONTENT_BUDGET_CHARS, clampLine, fitItems, pageFooter, toOffset } from "./output-budget.js";
 
 // Large meshes produce thousands of findings (1,500+ lines, ~225k chars), more than
 // MCP clients accept in one response.
@@ -15,7 +16,7 @@ export function getAnalyzeResults(
   }
 
   const limit = Math.max(1, filter.limit ?? DEFAULT_LIMIT);
-  const offset = Math.max(0, filter.offset ?? 0);
+  const offset = toOffset(filter.offset);
   const page = results.slice(offset, offset + limit);
 
   const byCode = new Map<string, { severity: string; count: number }>();
@@ -29,15 +30,18 @@ export function getAnalyzeResults(
     .map(([code, { severity, count }]) => `  ${code} (${severity}): ${count}`);
 
   const lines = [`=== istioctl analyze results (${results.length} findings) ===`, "", "By code:", ...summary, ""];
-  if (page.length === 0) {
+  const { taken, budgetHit } = fitItems(
+    page.map((r) => clampLine(`[${r.severity}] ${r.code} — ${r.resource}: ${r.message}`)),
+    { budget: Math.max(10_000, CONTENT_BUDGET_CHARS - summary.join("\n").length) },
+  );
+  if (taken.length === 0) {
     lines.push(`No findings at offset ${offset}.`);
   } else {
-    lines.push(...page.map((r) => `[${r.severity}] ${r.code} — ${r.resource}: ${r.message}`));
+    lines.push(...taken);
   }
-  const end = offset + page.length;
-  if (offset > 0 || end < results.length) {
-    lines.push("", `Showing ${page.length === 0 ? 0 : offset + 1}-${end} of ${results.length}.${end < results.length ? ` Pass offset=${end} for more, or filter by code.` : ""}`);
-  }
+  const end = offset + taken.length;
+  const footer = pageFooter(offset, end, results.length, { hint: "or filter by code", budgetHit });
+  if (footer) lines.push("", footer);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
 }

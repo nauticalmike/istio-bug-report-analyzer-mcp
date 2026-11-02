@@ -1,6 +1,9 @@
 import type { BugReportStore } from "../archive/store.js";
 import { readFileComponentLogs } from "./component-logs.js";
 import { logLevel } from "./log-level.js";
+import { clampLine, fitItems, fitItemsFromEnd, pageFooter, toOffset } from "./output-budget.js";
+
+const DEFAULT_LIMIT = 500;
 
 export async function getLogs(
   store: BugReportStore,
@@ -12,6 +15,7 @@ export async function getLogs(
     keyword?: string;
     limit?: number;
     tail?: number;
+    offset?: number;
   },
 ) {
   const allLines: { source: string; line: string }[] = [];
@@ -72,25 +76,37 @@ export async function getLogs(
   }
 
   const totalLines = filtered.length;
-
-  const limit = params.limit ?? 500;
-  if (filtered.length > limit) {
-    filtered = filtered.slice(-limit);
-  }
-
-  if (params.tail && params.tail < filtered.length) {
-    filtered = filtered.slice(-params.tail);
-  }
-
-  const truncatedByLimit = totalLines > filtered.length;
-
-  if (filtered.length === 0) {
+  if (totalLines === 0) {
     return { content: [{ type: "text" as const, text: "No log lines found matching the filter." }] };
   }
 
-  const header = `=== Logs (${filtered.length} of ${totalLines} lines) ===`;
-  const truncNote = truncatedByLimit ? `\n\n(Output truncated to ${limit} lines. Use tail/keyword to narrow.)` : "";
-  const body = filtered.map((l) => `[${l.source}] ${l.line}`).join("\n");
+  const limit = Math.max(1, params.limit ?? DEFAULT_LIMIT);
+  const render = (l: { source: string; line: string }) => clampLine(`[${l.source}] ${l.line}`);
 
-  return { content: [{ type: "text" as const, text: `${header}\n\n${body}${truncNote}` }] };
+  // With offset: page forward from the oldest matching line. Without: the most recent lines.
+  let start: number;
+  let shown: string[];
+  let budgetHit: boolean;
+  if (params.offset !== undefined) {
+    start = Math.min(toOffset(params.offset), totalLines);
+    if (start >= totalLines) {
+      return { content: [{ type: "text" as const, text: `No log lines at offset ${start} (${totalLines} match the filter).` }] };
+    }
+    ({ taken: shown, budgetHit } = fitItems(filtered.slice(start, start + limit).map(render)));
+  } else {
+    let window = filtered.slice(-limit);
+    if (params.tail && params.tail < window.length) window = window.slice(-params.tail);
+    ({ taken: shown, budgetHit } = fitItemsFromEnd(window.map(render)));
+    start = totalLines - shown.length;
+  }
+  const end = start + shown.length;
+
+  const header = `=== Logs (${shown.length} of ${totalLines} lines) ===`;
+  let footer = pageFooter(start, end, totalLines, { unit: "lines", hint: "or use keyword/pod to narrow", budgetHit });
+  if (footer && params.offset === undefined) {
+    footer = `${footer} These are the most recent lines; pass offset=0 to page from the oldest, or use tail/keyword to narrow.`;
+  }
+  const body = shown.join("\n");
+
+  return { content: [{ type: "text" as const, text: footer ? `${header}\n\n${body}\n\n${footer}` : `${header}\n\n${body}` }] };
 }

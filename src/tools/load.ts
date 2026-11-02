@@ -6,6 +6,7 @@ import { BugReportStore } from "../archive/store.js";
 import { extractArchive } from "../archive/extractor.js";
 import type { Session } from "../types.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
+import { clusterPreCheckLines } from "./cluster-warnings.js";
 
 export async function loadBugReport(
   { path }: { path: string },
@@ -78,6 +79,9 @@ export async function loadBugReport(
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
     ];
+    // From file sizes only: a dump too large for the heap is reported now, not at the first cluster tool.
+    const preCheck = clusterPreCheckLines(store);
+    if (preCheck.length > 0) summary.push("", ...preCheck);
     const issueLines = formatCollectionIssues(await getCollectionIssues(store));
     if (issueLines.length > 0) summary.push("", ...issueLines);
 

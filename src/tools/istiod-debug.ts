@@ -1,5 +1,6 @@
 import type { BugReportStore } from "../archive/store.js";
 import { getCollectionIssues } from "./collection-issues.js";
+import { renderTextPage } from "./output-budget.js";
 
 const DEBUG_COLLECTION_RE = /debug|istiod|discovery|status code|podExec|krt/i;
 
@@ -16,7 +17,7 @@ async function missingDataNote(store: BugReportStore): Promise<string> {
 
 export async function getIstiodDebug(
   store: BugReportStore,
-  params: { endpoint: string; namespace?: string; pod?: string },
+  params: { endpoint: string; namespace?: string; pod?: string; offset?: number },
 ) {
   const pods = params.namespace
     ? store.getIstiodPods(params.namespace)
@@ -54,6 +55,7 @@ export async function getIstiodDebug(
     };
   }
 
+  // configz and krtz reach hundreds of MB per istiod, so the rendered text is paged by character offset.
   const text = typeof data === "string" ? data : JSON.stringify(data, null, 2);
-  return { content: [{ type: "text" as const, text }] };
+  return { content: [{ type: "text" as const, text: renderTextPage(text, params.offset) }] };
 }

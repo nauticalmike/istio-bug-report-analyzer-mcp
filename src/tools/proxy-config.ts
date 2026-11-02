@@ -1,16 +1,18 @@
 import type { BugReportStore } from "../archive/store.js";
+import { renderTextPage } from "./output-budget.js";
 
 export function getProxyConfig(
   store: BugReportStore,
-  params: { namespace: string; pod: string; section?: string },
+  params: { namespace: string; pod: string; section?: string; offset?: number },
 ) {
   const config = store.getProxyConfig(params.namespace, params.pod, params.section);
   if (config === null) {
     return { content: [{ type: "text" as const, text: notFoundMessage(store, params) }], isError: true };
   }
 
+  // Sidecar config dumps run to several MB, so the rendered text is paged by character offset.
   const text = typeof config === "string" ? config : JSON.stringify(config, null, 2);
-  return { content: [{ type: "text" as const, text }] };
+  return { content: [{ type: "text" as const, text: renderTextPage(text, params.offset) }] };
 }
 
 function notFoundMessage(store: BugReportStore, params: { namespace: string; pod: string; section?: string }): string {

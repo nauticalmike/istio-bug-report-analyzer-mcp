@@ -1,8 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { closeSync, openSync, readFileSync, readSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
 import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
 import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
+import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import type {
   VersionInfo,
@@ -95,12 +96,6 @@ const CLUSTER_DUMP_FILES = [
   "cluster/nodes",
   "cluster/pods",
 ];
-
-// Retained heap per dump byte when parsed item by item: measured 1.5x on a 550 MB
-// dump and 2.3x on a 1.2 GB one, plus headroom for the tools that then filter the
-// result. Running out of heap kills the server, so a dump that would not fit is
-// skipped with a warning instead.
-const HEAP_PER_DUMP_BYTE = 3;
 
 function resourceKey(r: ParsedResource): string {
   return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
@@ -202,23 +197,9 @@ export class BugReportStore {
     if (this.clusterResources) return this.clusterResources;
     const sizes = new Map(this.index.files.map((f) => [f.relativePath, f.size]));
     const dumps = CLUSTER_DUMP_FILES.filter((f) => this.pathIndex.has(f));
-    const issues: string[] = [];
-
-    const heap = getHeapStatistics();
-    const budget = heap.heap_size_limit * 0.9 - heap.used_heap_size;
-    const need = (files: string[]) => files.reduce((sum, f) => sum + (sizes.get(f) ?? 0) * HEAP_PER_DUMP_BYTE, 0);
-    const skipped = new Set<string>();
-    const bySize = [...dumps].sort((a, b) => (sizes.get(b) ?? 0) - (sizes.get(a) ?? 0));
-    // Heap size (MiB, rounded up to a GiB) that would fit every dump.
-    const mb = Math.ceil((need(dumps) + heap.used_heap_size) / 0.9 / 2 ** 30) * 1024;
-    while (need(dumps.filter((f) => !skipped.has(f))) > budget && skipped.size < bySize.length) {
-      const largest = bySize[skipped.size];
-      skipped.add(largest);
-      issues.push(
-        `${largest} (${formatMB(sizes.get(largest) ?? 0)}) was not parsed: the cluster dumps need ~${formatMB(need(dumps))} of heap and ` +
-          `~${formatMB(Math.max(0, budget))} is available. Restart the server with NODE_OPTIONS=--max-old-space-size=${mb} to load all cluster dumps.`,
-      );
-    }
+    const plan = planClusterDumpLoad(dumps.map((file) => ({ file, bytes: sizes.get(file) ?? 0 })), getHeapStatistics());
+    const issues = plan.skipped.map((s) => s.message);
+    const skipped = new Set(plan.skipped.map((s) => s.file));
 
     const acc = newClusterAccumulator();
     for (const file of dumps) {
@@ -276,6 +257,51 @@ export class BugReportStore {
   getClusterDumpSummary(): { files: number; bytes: number } {
     const dumps = this.index.files.filter((f) => CLUSTER_DUMP_FILES.includes(f.relativePath));
     return { files: dumps.length, bytes: dumps.reduce((sum, f) => sum + f.size, 0) };
+  }
+
+  /**
+   * The heap guard of the cluster parse, run on file sizes from the index only (nothing
+   * is read or parsed), so load_bug_report and get_overview can warn before any cluster
+   * tool runs. Same plan and messages as the parse; `heap` is injectable for tests.
+   */
+  getClusterDumpPreCheck(heap: HeapStats = getHeapStatistics()): DumpLoadPlan {
+    const dumps = CLUSTER_DUMP_FILES.filter((f) => this.pathIndex.has(f)).map((file) => ({ file, bytes: this.getFileSize(file) ?? 0 }));
+    return planClusterDumpLoad(dumps, heap, "planned");
+  }
+
+  /**
+   * Reads at most `length` bytes of a file from byte `offset`, without reading the rest,
+   * so files over V8's string limit can be paged. The start moves forward to a UTF-8
+   * character boundary and, unless the range reaches the end of the file, it is cut after
+   * its last newline (or back to a character boundary when it holds none) so the next
+   * range starts cleanly. Null when the file is missing or unreadable.
+   */
+  readFileRange(relativePath: string, offset: number, length: number): { text: string; start: number; end: number; size: number } | null {
+    const absolutePath = this.pathIndex.get(relativePath);
+    if (!absolutePath) return null;
+    let fd: number | undefined;
+    try {
+      fd = openSync(absolutePath, "r");
+      const size = fstatSync(fd).size;
+      const from = Math.min(Math.max(0, Math.floor(offset)), size);
+      const want = Math.min(Math.max(1, Math.floor(length)), size - from);
+      // One extra byte shows whether the cut lands inside a character.
+      const buf = Buffer.alloc(want + 1);
+      const n = readSync(fd, buf, 0, Math.min(want + 1, size - from), from);
+      let lo = 0;
+      while (lo < Math.min(n, 3) && isContinuationByte(buf[lo])) lo++;
+      let hi = Math.min(want, n);
+      if (from + hi < size) {
+        const nl = buf.lastIndexOf(0x0a, hi - 1);
+        if (nl >= lo) hi = nl + 1;
+        else while (hi > lo && isContinuationByte(buf[hi])) hi--;
+      }
+      return { text: buf.toString("utf-8", lo, hi), start: from + lo, end: from + hi, size };
+    } catch {
+      return null;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
 
   // === Public Query Methods ===
@@ -439,8 +465,9 @@ function newClusterAccumulator(): ClusterAccumulator {
   return { seen: new Set(), resources: [] };
 }
 
-function formatMB(bytes: number): string {
-  return `${Math.round(bytes / 1e6).toLocaleString("en-US")} MB`;
+/** A UTF-8 byte that continues a multi-byte character (0b10xxxxxx). */
+function isContinuationByte(byte: number | undefined): boolean {
+  return byte !== undefined && (byte & 0xc0) === 0x80;
 }
 
 function addClusterDump(acc: ClusterAccumulator, resources: ParsedResource[]): void {
