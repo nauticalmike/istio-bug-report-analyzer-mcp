@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { noiseKind, normalizeLogLine } from "../../src/tools/log-patterns.js";
+import { LogLineNormalizer, noiseKind, normalizeLogLine } from "../../src/tools/log-patterns.js";
 
 describe("normalizeLogLine", () => {
   const same = (a: string, b: string) => expect(normalizeLogLine(a)).toBe(normalizeLogLine(b));
@@ -85,3 +85,33 @@ describe("noiseKind", () => {
   });
 });
 
+
+describe("LogLineNormalizer", () => {
+  const lines = [
+    "2026-01-01T00:00:00.123456Z\terror\tads\tpush failed for app-7d9f8b6c4d-x2k9p",
+    "2026-02-03T04:05:06Z\terror\tads\tpush failed for app-7d9f8b6c4d-x2k9p",
+    "2026-02-03 04:05:06,123+02:00 warn retry after 1.5s",
+    "[2026-01-01 00:00:00.123][15][warning][config] stream closed",
+    "[2026-01-02 10:11:12.999][27][warning][config] stream closed",
+    "[C12] upstream reset",
+    "E1020 20:23:09.123456   12345 reflector.go:150] watch failed",
+    '{"level":"error","time":"2026-01-01T00:00:00Z","msg":"boom"}',
+    "2026-01-01T00:00:00Z[bracket right after the time] x",
+    `2026-01-01T00:00:00Z\terror\t${"x".repeat(2_100)}`,
+  ];
+
+  it("gives exactly what normalizeLogLine gives, on first sight and from the cache", () => {
+    const n = new LogLineNormalizer();
+    for (const pass of [1, 2]) {
+      for (const line of lines) expect(n.normalize(line), `pass ${pass}: ${line.slice(0, 60)}`).toBe(normalizeLogLine(line));
+    }
+  });
+
+  it("stays correct once the memo is full", () => {
+    const n = new LogLineNormalizer(3);
+    for (let i = 0; i < 20; i++) {
+      const line = `2026-01-01T00:00:${String(i % 60).padStart(2, "0")}Z\terror\tmessage ${i % 7}`;
+      expect(n.normalize(line)).toBe(normalizeLogLine(line));
+    }
+  });
+});

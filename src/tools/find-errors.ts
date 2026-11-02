@@ -1,7 +1,7 @@
 import type { BugReportStore } from "../archive/store.js";
 import { listLogSources } from "./log-sources.js";
 import { logLevel, type LogLevel } from "./log-level.js";
-import { noiseKind, normalizeLogLine } from "./log-patterns.js";
+import { LogLineNormalizer, noiseKind } from "./log-patterns.js";
 import { clampLine, fitItems, pageFooter, toOffset } from "./output-budget.js";
 import { describeScanProblems, scanLogSources } from "./log-scan.js";
 
@@ -48,6 +48,8 @@ export async function findErrors(
   const groups = new Map<string, ErrorGroup>();
   let totalLines = 0;
   let overflowLines = 0;
+  // Most error lines repeat a message seen before at another time: normalize each message once.
+  const normalizer = new LogLineNormalizer();
 
   const scan = await scanLogSources(store, listLogSources(store, params.component), (source, raw) => {
     const line = raw.trim();
@@ -56,7 +58,7 @@ export async function findErrors(
     if (level === null) return;
     if (kw && !line.toLowerCase().includes(kw)) return;
     totalLines++;
-    const key = normalizeLogLine(line);
+    const key = normalizer.normalize(line);
 
     const existing = groups.get(key);
     if (existing) {

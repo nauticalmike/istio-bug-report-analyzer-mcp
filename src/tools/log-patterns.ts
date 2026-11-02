@@ -100,6 +100,54 @@ export function normalizeLogLine(line: string): string {
   return s.trim();
 }
 
+// The leading timestamp TIMESTAMP_RE replaces and the next rule drops, matched at the start only.
+const LEADING_TIMESTAMP_RE = new RegExp(`^(?:${TIMESTAMP_RE.source})`);
+const DIGIT_RE = /^\d/;
+
+/**
+ * normalizeLogLine with a bounded memo, for one scan of many lines. The memo key is the line
+ * without the leading timestamp or Envoy prefix that normalizeLogLine drops anyway, so the
+ * same message logged at different times is normalized once. Every result equals
+ * normalizeLogLine(line); lines past MAX_PATTERN_INPUT_CHARS are not memoized (the cut point
+ * depends on the prefix length). The memo keeps the first `maxEntries` distinct messages and
+ * then stops growing: clearing and refilling it churned the old generation and raised peak
+ * RSS, while the messages that repeat most usually appear early. Past that, a line costs
+ * one lookup more than normalizeLogLine.
+ */
+export class LogLineNormalizer {
+  // One memo per kind of prefix dropped, so a key is a slice of the line, never a new string.
+  private readonly envoy = new Map<string, string>();
+  private readonly timestamped = new Map<string, string>();
+  private readonly other = new Map<string, string>();
+  private size = 0;
+
+  constructor(private readonly maxEntries = 1_000) {}
+
+  normalize(line: string): string {
+    if (line.length > MAX_PATTERN_INPUT_CHARS) return normalizeLogLine(line);
+    let memo = this.other;
+    let key = line;
+    if (line.startsWith("[")) {
+      memo = this.envoy;
+      key = line.replace(ENVOY_PREFIX_RE, "");
+    } else if (DIGIT_RE.test(line)) {
+      const ts = LEADING_TIMESTAMP_RE.exec(line);
+      if (ts) {
+        memo = this.timestamped;
+        key = line.slice(ts[0].length);
+      }
+    }
+    const hit = memo.get(key);
+    if (hit !== undefined) return hit;
+    const value = normalizeLogLine(line);
+    if (this.size < this.maxEntries) {
+      memo.set(key, value);
+      this.size++;
+    }
+    return value;
+  }
+}
+
 const NOISE: { kind: string; re: RegExp }[] = [
   { kind: "probe", re: /\b(readiness|liveness|startup) probe\b|request to probe app failed|\bapp probe\b|\bprobe failed\b/i },
   { kind: "metrics scrape", re: /failed scraping|failed to scrape|\bscrape (failed|error)|metrics merg/i },
