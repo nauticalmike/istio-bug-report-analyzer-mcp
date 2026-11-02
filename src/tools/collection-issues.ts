@@ -37,6 +37,8 @@ const DETAIL_BULLET_RE = /^\s+\*\s+(.*)$/;
 export const POD_COLLECTION_ERROR_RE = /\bexec\b|port-?forward|\bforbidden\b/i;
 /** Pods plus namespaces remembered from such lines; past it, PodErrorRefs.truncated. */
 export const MAX_POD_ERROR_REFS = 20_000;
+/** Longer tokens cannot be pod or namespace names (DNS subdomain limit). */
+const MAX_K8S_NAME_CHARS = 253;
 // Only the start of a line is searched for names: a multi-MiB line costs no more than this.
 const MAX_REF_SCAN_CHARS = 2_000;
 const MAX_REF_TEXT_CHARS = 200;
@@ -141,7 +143,7 @@ export class CollectionIssueCollector {
     if (!POD_COLLECTION_ERROR_RE.test(head)) return;
     let text: string | undefined;
     const keep = (map: Map<string, string>, name: string) => {
-      if (map.has(name)) return;
+      if (name.length > MAX_K8S_NAME_CHARS || map.has(name)) return;
       if (this.refs.pods.size + this.refs.namespaces.size >= MAX_POD_ERROR_REFS) {
         this.refs.truncated = true;
         return;

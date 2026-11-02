@@ -227,6 +227,14 @@ describe("CollectionIssueCollector pod-error references", () => {
     expect(refs.pods.get("app0-7d9f8b6c4d-gbx2b")).toContain("gbx2b");
   });
 
+  it("does not keep names longer than a Kubernetes name can be", () => {
+    const c = new CollectionIssueCollector();
+    const long = `app-${"a1".repeat(200)}`;
+    c.add(`Error: failed to exec in container istio-proxy of pod ${long}: timeout`);
+    expect(c.podErrorRefs().pods.has(long)).toBe(false);
+    expect([...c.podErrorRefs().pods.keys()].every((k) => k.length <= 253)).toBe(true);
+  });
+
   it("splits pod.namespace into the pod and its namespace", () => {
     const c = new CollectionIssueCollector();
     c.add("Error: failed to port-forward to pod app0-7d9f8b6c4d-gbx2b.ns5: EOF");
