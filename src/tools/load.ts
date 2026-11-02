@@ -99,6 +99,7 @@ export async function loadBugReport(
   let held: { dir: string; drop: () => Promise<void> } | undefined;
   try {
     // The startup sweep deletes dead servers' extractions: one of them may be what is loaded.
+    // Only its classification is awaited; the doomed dirs are already renamed out of the prefix.
     await (opts.ready ?? startupSweepDone());
     const pathStat = await stat(path);
     let archiveDir: string;

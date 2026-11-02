@@ -18,7 +18,8 @@ try {
     // Archives are extracted to temp directories; delete them on exit and on SIGINT/SIGTERM/SIGHUP.
     installExitCleanup(extractionTracker);
     // And those a previous server could not delete (killed with SIGKILL, crashed), by their marker.
-    // load_bug_report waits for it (startupSweepDone), so it never races a load.
+    // load_bug_report waits only for its classification (startupSweepDone): doomed dirs are
+    // renamed out of the prefix first, so it never races a load, and deleted in the background.
     void runStartupSweep(tmpdir());
     const config = loadConfig();
     const { server } = createServer(config);

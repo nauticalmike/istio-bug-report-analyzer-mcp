@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { hostname, tmpdir } from "node:os";
@@ -12,6 +12,10 @@ import {
   EXTRACT_MARKER_FILE,
   ExtractionTracker,
   sweepStaleExtractions,
+  sweepStaleExtractionsInBackground,
+  runStartupSweep,
+  startupSweepDone,
+  thisHost,
   checkFreeSpace,
   estimateExpandedSize,
   installExitCleanup,
@@ -101,6 +105,9 @@ describe("ExtractionTracker", () => {
     const lines = (await readFile(join(dir, EXTRACT_MARKER_FILE), "utf8")).trim().split("\n");
     expect(lines[0]).toBe(String(process.pid));
     expect(lines).toContain(`host=${hostname()}`);
+    const pidNs = thisHost().pidNs;
+    if (pidNs) expect(lines).toContain(`pidns=${pidNs}`);
+    else expect(lines.some((l) => l.startsWith("pidns="))).toBe(false);
   });
 
   it("keeps a dir that a second owner still reads after the first releases it", async () => {
@@ -125,6 +132,28 @@ describe("ExtractionTracker", () => {
     expect(await tracker.containing(dir)).toBe(dir);
     expect(await tracker.containing(parent)).toBeUndefined();
     expect(await tracker.containing(`${dir}-other`)).toBeUndefined();
+  });
+
+  it("does not hand out a dir it is removing (lookup during the rm)", async () => {
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(parent);
+    await mkdir(join(dir, "bug-report"));
+    const removing = tracker.remove(dir);
+    expect(await tracker.containing(join(dir, "bug-report"))).toBeUndefined();
+    expect(await tracker.holdContaining(join(dir, "bug-report"))).toBeUndefined();
+    expect(await tracker.remove(dir)).toBe(false);
+    expect(await removing).toBe(true);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("removeAllSync still deletes a dir whose async remove is under way", async () => {
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(parent);
+    const removing = tracker.remove(dir);
+    tracker.removeAllSync();
+    expect(existsSync(dir)).toBe(false);
+    await removing;
+    expect(tracker.size).toBe(0);
   });
 
   it("removeAllSync deletes every dir it still owns", async () => {
@@ -192,6 +221,52 @@ describe("sweepStaleExtractions", () => {
     const alive = () => true;
     expect(await sweepStaleExtractions(parent, alive, { hostname: "h1", bootId: "bbbb" })).toEqual([earlier]);
     expect(existsSync(current)).toBe(true);
+  });
+
+  it("leaves a dir from another pid namespace alone even when that pid is not running here", async () => {
+    const other = await dirWith(`${EXTRACT_DIR_PREFIX}other-ns`, `${DEAD}\nhost=h1\npidns=pid:[111]\n`);
+    const same = await dirWith(`${EXTRACT_DIR_PREFIX}same-ns`, `${DEAD}\nhost=h1\npidns=pid:[222]\n`);
+    expect(await sweepStaleExtractions(parent, isAlive, { hostname: "h1", bootId: null, pidNs: "pid:[222]" })).toEqual([same]);
+    expect(existsSync(other)).toBe(true);
+  });
+
+  it("takes an earlier boot as proof of death only when the pid namespace matches too", async () => {
+    const alive = () => true;
+    const sameNs = await dirWith(`${EXTRACT_DIR_PREFIX}same-ns`, `${process.pid + 1}\nhost=h1\nboot=aaaa\npidns=pid:[222]\n`);
+    // Written by a server that recorded no pid namespace, read by one that has one: not proof.
+    const noNs = await dirWith(`${EXTRACT_DIR_PREFIX}no-ns`, `${process.pid + 1}\nhost=h1\nboot=aaaa\n`);
+    expect(await sweepStaleExtractions(parent, alive, { hostname: "h1", bootId: "bbbb", pidNs: "pid:[222]" })).toEqual([sameNs]);
+    expect(existsSync(noNs)).toBe(true);
+  });
+
+  it("deletes in the background: doomed dirs leave the prefix before the classification resolves", async () => {
+    const stale = await dirWith(`${EXTRACT_DIR_PREFIX}stale`, `${DEAD}\n`);
+    const live = await dirWith(`${EXTRACT_DIR_PREFIX}live`, `${process.pid}\n`);
+    const { doomed, deleted } = await sweepStaleExtractionsInBackground(parent, isAlive);
+    expect(doomed).toEqual([stale]);
+    expect(existsSync(stale)).toBe(false);
+    expect((await readdir(parent)).filter((n) => n.startsWith(EXTRACT_DIR_PREFIX))).toEqual([`${EXTRACT_DIR_PREFIX}live`]);
+    await deleted;
+    expect(await readdir(parent)).toEqual([`${EXTRACT_DIR_PREFIX}live`]);
+    expect(existsSync(live)).toBe(true);
+  });
+
+  it("lets loads wait only for the startup sweep's classification", async () => {
+    // Our own pid is alive: write a marker from another (dead) host-local pid via the default check.
+    const stale = await dirWith(`${EXTRACT_DIR_PREFIX}stale`, `${DEAD}\nhost=${hostname()}\n`);
+    const done = runStartupSweep(parent);
+    await startupSweepDone();
+    expect(existsSync(stale)).toBe(false);
+    expect(await done).toEqual([stale]);
+    expect(await readdir(parent)).toEqual([]);
+  });
+
+  it("finishes deleting a doomed dir a previous sweep renamed but did not delete", async () => {
+    const leftover = await dirWith(`.deleting-${EXTRACT_DIR_PREFIX}old`, `${process.pid}\n`);
+    const unmarked = await dirWith(`.deleting-${EXTRACT_DIR_PREFIX}unmarked`);
+    expect(await sweepStaleExtractions(parent, isAlive)).toEqual([]);
+    expect(existsSync(leftover)).toBe(false);
+    expect(existsSync(unmarked)).toBe(true);
   });
 
   it("returns nothing for a missing parent", async () => {

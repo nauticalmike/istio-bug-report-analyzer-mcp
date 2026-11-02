@@ -133,10 +133,14 @@ the npm package (`istio-bug-report-analyzer-mcp`).
 
 - Extraction dirs (`bug-report-extract-*`) are deleted when another report is loaded and
   when the server exits (including SIGINT, SIGTERM, SIGHUP). Each holds a marker with the
-  creating pid, host name and (on Linux) boot id; at startup the server deletes those in the
-  temp directory written on this host whose process is gone or that date from an earlier
-  boot. Directories without the marker, or written by another host, are never touched. Loads
-  wait for that sweep. Loading a directory inside an extraction keeps that extraction until
+  creating pid, host name and (on Linux) boot id and pid namespace; at startup the server
+  deletes those in the temp directory written on this host and pid namespace whose process
+  is gone or that date from an earlier boot (an earlier boot counts only with a matching pid
+  namespace). Directories without the marker, or written by another host or pid namespace,
+  are never touched; on macOS a host-name change leaves older leftovers unswept, never
+  wrongly deleted. Loads wait only for that sweep's classification: doomed dirs are renamed
+  out of the prefix and deleted in the background. A dir being deleted is never handed to
+  a load. Loading a directory inside an extraction keeps that extraction until
   the report reading it is replaced, also when another load replaces the old report while
   the first one is still reading it.
 - Cluster dumps over 512 MiB load item by item; a dump that will not fit in the heap is
