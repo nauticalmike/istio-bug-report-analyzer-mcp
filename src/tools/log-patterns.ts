@@ -20,48 +20,84 @@ const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\
 const BRACKETED_IPV6_RE = /\[([0-9a-f:.]*:[0-9a-f:.]*)\](?::\d{1,5})?/gi;
 const BARE_IPV6_RE = /(?<![\w:.])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?:\.\d{1,3}){0,3}(?![\w:])/gi;
 const IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b/g;
-const REPLICASET_POD_RE = new RegExp(`\\b([a-z0-9][a-z0-9-]*?)-(${K8S}{6,10})-(${K8S}{5})\\b`, "g");
-const DAEMONSET_POD_RE = new RegExp(`\\b([a-z0-9][a-z0-9-]*?)-(${K8S}{5})\\b`, "g");
+// "<name>-<replicaset hash>-<suffix>" and "<name>-<suffix>". These and HOST_PORT_RE start with a
+// literal and check the character before the match in code: V8 scans for a leading literal
+// quickly, while a lookbehind is tried at every position.
+const REPLICASET_POD_RE = new RegExp(`-(${K8S}{6,10})-(${K8S}{5})\\b`, "g");
+const DAEMONSET_POD_RE = new RegExp(`-(${K8S}{5})\\b`, "g");
+const POD_NAME_CHAR_RE = /[a-z0-9]/;
 const KEY_VALUE_ID_RE = /\b(ns|namespace|name|pod|pod_name|id|uid|conn_id|connection_id|request_id|trace_id|stream_id|src\.[\w.]+|dst\.[\w.]+)=("[^"]*"|[^\s,;)\]]+)/g;
 const ENVOY_CONN_RE = /\[([CS])\d+\]/g;
 const DURATION_RE = /(?<![\w.])(?:\d+(?:\.\d+)?(?:ns|us|µs|ms|h|m|s))+(?![\w.])/g;
 const HEX_ID_RE = /\b(?=[a-f0-9]*\d)[a-f0-9]{8,}\b/gi;
 const DECIMAL_RE = /(?<![\w.])\d+\.\d+(?![\w.])/g;
-const HOST_PORT_RE = /(?<=[A-Za-z\]>]):\d{1,5}\b/g;
+const HOST_PORT_RE = /:\d{1,5}\b/g;
+const HOST_END_CHAR_RE = /[A-Za-z\]>]/;
 const LONG_NUMBER_RE = /(?<![\w<])\d{4,}(?![\w>])/g;
 
+function countColons(s: string): number {
+  let n = 0;
+  for (let i = s.indexOf(":"); i !== -1; i = s.indexOf(":", i + 1)) n++;
+  return n;
+}
+
 function isIPv6(candidate: string): boolean {
-  return candidate.includes("::") || (candidate.match(/:/g)?.length ?? 0) === 7;
+  return candidate.includes("::") || countColons(candidate) === 7;
 }
 
 function hasDigit(...parts: string[]): boolean {
   return parts.some((p) => /\d/.test(p));
 }
 
+// The String.prototype.replace callback: the match, its groups, then the offset and the whole string.
+type Replacer = (match: string, ...args: any[]) => string;
+
+/** True when the character before `offset` in `str` matches `re`. */
+function after(re: RegExp, str: string, offset: number): boolean {
+  return offset > 0 && re.test(str[offset - 1]);
+}
+
+// Applied in order; each rule sees the output of the ones before it. `when` is a cheap
+// substring check that skips a rule's regex on lines it cannot match: find_errors
+// normalizes every error line of multi-GB logs, and the regex scans dominate its run time.
+const RULES: { re: RegExp; to: string | Replacer; when?: (s: string) => boolean }[] = [
+  { re: ENVOY_PREFIX_RE, to: "", when: (s) => s.startsWith("[") },
+  { re: KLOG_PREFIX_RE, to: "$1 " },
+  { re: TIMESTAMP_RE, to: "<TS>", when: (s) => s.includes("-") },
+  { re: /^\s*<TS>/, to: "", when: (s) => s.includes("<TS>") },
+  { re: JSON_VOLATILE_RE, to: '"$1":"<*>"', when: (s) => s.includes('"') },
+  { re: UUID_RE, to: "<UUID>", when: (s) => s.includes("-") },
+  { re: BRACKETED_IPV6_RE, to: (m, addr) => (isIPv6(addr) ? "<IP>" : m), when: (s) => s.includes("[") },
+  { re: BARE_IPV6_RE, to: (m) => (isIPv6(m) ? "<IP>" : m), when: (s) => s.includes("::") || countColons(s) >= 7 },
+  { re: IPV4_RE, to: "<IP>", when: (s) => s.includes(".") },
+  {
+    re: REPLICASET_POD_RE,
+    to: (m, hash, suffix, offset, str) => (hasDigit(hash, suffix) && after(POD_NAME_CHAR_RE, str, offset) ? "-<POD>" : m),
+    when: (s) => s.includes("-"),
+  },
+  {
+    re: DAEMONSET_POD_RE,
+    to: (m, suffix, offset, str) => (hasDigit(suffix) && after(POD_NAME_CHAR_RE, str, offset) ? "-<POD>" : m),
+    when: (s) => s.includes("-"),
+  },
+  { re: KEY_VALUE_ID_RE, to: "$1=<*>", when: (s) => s.includes("=") },
+  { re: ENVOY_CONN_RE, to: "[$1<N>]", when: (s) => s.includes("[") },
+  { re: DURATION_RE, to: "<DUR>" },
+  { re: DECIMAL_RE, to: "<NUM>", when: (s) => s.includes(".") },
+  { re: HEX_ID_RE, to: "<ID>" },
+  { re: HOST_PORT_RE, to: (m, offset, str) => (after(HOST_END_CHAR_RE, str, offset) ? ":<PORT>" : m), when: (s) => s.includes(":") },
+  { re: LONG_NUMBER_RE, to: "<N>" },
+  { re: /\s+/g, to: " " },
+];
+
 /** The grouping key of a log line: the same message with different volatile tokens gets the same key. */
 export function normalizeLogLine(line: string): string {
-  return line
-    .slice(0, MAX_PATTERN_INPUT_CHARS)
-    .replace(ENVOY_PREFIX_RE, "")
-    .replace(KLOG_PREFIX_RE, "$1 ")
-    .replace(TIMESTAMP_RE, "<TS>")
-    .replace(/^\s*<TS>/, "")
-    .replace(JSON_VOLATILE_RE, '"$1":"<*>"')
-    .replace(UUID_RE, "<UUID>")
-    .replace(BRACKETED_IPV6_RE, (m, addr: string) => (isIPv6(addr) ? "<IP>" : m))
-    .replace(BARE_IPV6_RE, (m) => (isIPv6(m) ? "<IP>" : m))
-    .replace(IPV4_RE, "<IP>")
-    .replace(REPLICASET_POD_RE, (m, name: string, hash: string, suffix: string) => (hasDigit(hash, suffix) ? `${name}-<POD>` : m))
-    .replace(DAEMONSET_POD_RE, (m, name: string, suffix: string) => (hasDigit(suffix) ? `${name}-<POD>` : m))
-    .replace(KEY_VALUE_ID_RE, "$1=<*>")
-    .replace(ENVOY_CONN_RE, "[$1<N>]")
-    .replace(DURATION_RE, "<DUR>")
-    .replace(DECIMAL_RE, "<NUM>")
-    .replace(HEX_ID_RE, "<ID>")
-    .replace(HOST_PORT_RE, ":<PORT>")
-    .replace(LONG_NUMBER_RE, "<N>")
-    .replace(/\s+/g, " ")
-    .trim();
+  let s = line.slice(0, MAX_PATTERN_INPUT_CHARS);
+  for (const { re, to, when } of RULES) {
+    if (when && !when(s)) continue;
+    s = typeof to === "string" ? s.replace(re, to) : s.replace(re, to);
+  }
+  return s.trim();
 }
 
 const NOISE: { kind: string; re: RegExp }[] = [
