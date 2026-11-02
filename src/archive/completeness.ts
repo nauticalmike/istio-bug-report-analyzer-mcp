@@ -69,6 +69,9 @@ const LOG_PROBLEMS: { kind: string; re: RegExp }[] = [
   { kind: "timeout", re: /\btimed? ?out\b|\btimeout\b|deadline exceeded/i },
 ];
 
+// URLs and request paths with a query, which carry parameters like ?timeout=10m0s that are not errors.
+const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+|(?<![^\s"'(])\/[^\s"'<>]*\?[^\s"'<>]*/gi;
+
 export const POD_DUMP_FILES = ["cluster/k8s-resources", "cluster/pods"];
 
 const signal = (id: CompletenessSignalId, status: CompletenessStatus, summary: string, details: string[] = []): CompletenessSignal => ({
@@ -234,7 +237,8 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
   const hits = new Map<string, { count: number; example: string }>();
   for (const issue of scan.issues) {
     for (const text of [issue.message, ...(issue.details ?? [])]) {
-      const kind = LOG_PROBLEMS.find(({ re }) => re.test(text))?.kind;
+      const bare = text.replace(URL_RE, "<URL>");
+      const kind = LOG_PROBLEMS.find(({ re }) => re.test(bare))?.kind;
       if (!kind) continue;
       // A bullet seen N times under one header ends in " (xN)".
       const count = issue.count * Number(/ \(x(\d+)\)$/.exec(text)?.[1] ?? 1);

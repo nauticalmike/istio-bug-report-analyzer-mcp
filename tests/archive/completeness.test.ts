@@ -242,6 +242,16 @@ describe("data completeness verdict", () => {
     expect(s.summary).toMatch(/auth x2/);
   });
 
+  it("does not read a timeout query parameter in a URL as a timeout error", async () => {
+    await writeFile(join(dir, "bug-report.log"), 'Error: Get "https://10.96.0.1:443/api/v1/namespaces/shop/pods?timeout=10m0s": dial tcp 10.96.0.1:443: connect: connection refused\n');
+    expect((await signal("bug-report-log")).status).toBe("ok");
+  });
+
+  it("still flags a timeout reported after a URL", async () => {
+    await writeFile(join(dir, "bug-report.log"), 'Error: Get "https://10.96.0.1:443/api/v1/pods?timeout=32s": context deadline exceeded\n');
+    expect((await signal("bug-report-log")).summary).toMatch(/timeout x1/);
+  });
+
   it("counts each repeat of an identical bullet under a header", async () => {
     await writeFile(join(dir, "bug-report.log"), "Error: 3 errors occurred:\n\t* failed to get proxy-a: Forbidden\n\t* failed to get proxy-a: Forbidden\n\t* failed to get proxy-a: Forbidden\n");
     expect((await signal("bug-report-log")).summary).toMatch(/auth x3/);
