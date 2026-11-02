@@ -1,6 +1,6 @@
 import type { BugReportStore } from "../archive/store.js";
 import { logLevel, type LogLevel } from "./log-level.js";
-import { normalizePorts } from "./log-patterns.js";
+import { normalizeLogLine } from "./log-patterns.js";
 
 export interface CollectionIssue {
   level: LogLevel;
@@ -10,7 +10,7 @@ export interface CollectionIssue {
   details?: string[];
   /** Bullets beyond those kept in `details`. */
   moreDetails?: number;
-  /** Distinct messages folded into this issue because they differ only in port numbers (set when > 1). */
+  /** Distinct messages folded into this issue because they differ only in volatile tokens: ports, ids, addresses (set when > 1). */
   variants?: number;
 }
 
@@ -18,14 +18,13 @@ const BUG_REPORT_LOG = "bug-report.log";
 const MAX_MESSAGE_CHARS = 300;
 const MAX_LISTED = 10;
 const MAX_DETAILS = 10;
-/** Distinct port variants remembered per issue; beyond this the count stops growing. */
+/** Distinct variants remembered per issue; beyond this the count stops growing. */
 const MAX_VARIANTS = 1_000;
 /**
  * Distinct issues kept; lines that would start another are only counted (overflowLines).
  * A log of unique warnings would otherwise keep every line, and it can be several GB.
  */
 export const MAX_COLLECTION_ISSUES = 5_000;
-const PORTS_RE = /(?<=[\w\]]):\d{2,5}\b/g;
 const ISTIO_PREFIX_RE = /^\d{4}-\d{2}-\d{2}[T ][\d:.]+Z?\s+[A-Za-z]+\s+/;
 const COBRA_ERROR_RE = /^Error:\s*(.+)$/;
 // Istio's log rate limiter collapses duplicates into one line with this suffix.
@@ -47,12 +46,13 @@ interface PendingIssue {
  * held in memory (field logs exceed V8's ~512 MiB string limit).
  * istioctl writes the same failure as an "Error: ..." line on stderr/stdout and as a
  * leveled log line, so both forms are reduced to the bare message before deduplication.
- * Messages that differ only in port numbers (one per port-forward) are one issue.
+ * Messages that differ only in volatile tokens (ports, pod and container ids, addresses,
+ * durations: one per port-forward or pod) are one issue, grouped on normalizeLogLine.
  */
 export class CollectionIssueCollector {
   private readonly byKey = new Map<string, CollectionIssue>();
-  /** Per issue, the port sequences seen (a variant differs from the issue only in its ports). */
-  private readonly variantsByKey = new Map<string, Set<string>>();
+  /** Per issue, hashes of the distinct texts seen (a variant differs from the issue only in volatile tokens). */
+  private readonly variantsByKey = new Map<string, Set<number>>();
   private pending: PendingIssue | null = null;
   /** Lines (with their repeat counts) of issues not kept because MAX_COLLECTION_ISSUES was reached. */
   overflowLines = 0;
@@ -111,9 +111,10 @@ export class CollectionIssueCollector {
   }
 
   private record(level: LogLevel, message: string, occurrences: number, details: string[] = [], moreDetails = 0): void {
-    const text = [message, ...details].join("\n");
-    const key = normalizePorts(text);
-    const ports = (text.match(PORTS_RE) ?? []).join("");
+    const parts = [message, ...details];
+    // Per part: normalizeLogLine reads only the first MAX_PATTERN_INPUT_CHARS of its input.
+    const key = parts.map(normalizeLogLine).join("\n");
+    const variant = hash(parts.join("\n"));
     const existing = this.byKey.get(key);
     if (!existing) {
       if (this.byKey.size >= MAX_COLLECTION_ISSUES) {
@@ -126,16 +127,30 @@ export class CollectionIssueCollector {
       if (moreDetails > 0) issue.moreDetails = moreDetails;
       const kept = flat(key);
       this.byKey.set(kept, issue);
-      this.variantsByKey.set(kept, new Set([ports]));
+      this.variantsByKey.set(kept, new Set([variant]));
       return;
     }
     existing.count += occurrences;
     const variants = this.variantsByKey.get(key)!;
-    if (variants.size < MAX_VARIANTS && !variants.has(ports)) {
-      variants.add(ports);
+    if (variants.size < MAX_VARIANTS && !variants.has(variant)) {
+      variants.add(variant);
       existing.variants = variants.size;
     }
   }
+}
+
+/** A 53-bit string hash (cyrb53), so a variant is remembered without keeping its text. */
+function hash(s: string): number {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
 /** A copy of `s` that shares no memory with the string it was sliced from. */
@@ -200,7 +215,7 @@ export function formatCollectionIssues(issues: CollectionIssue[], overflowLines 
   for (const issue of issues.slice(0, MAX_LISTED)) {
     const notes: string[] = [];
     if (issue.count > 1) notes.push(`x${issue.count}`);
-    if (issue.variants) notes.push(`${issue.variants} variants differing only in port`);
+    if (issue.variants) notes.push(`${issue.variants} variants differing only in ports/ids`);
     lines.push(`  - [${issue.level}] ${issue.message}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`);
     for (const detail of issue.details ?? []) lines.push(`      * ${detail}`);
     if (issue.moreDetails) lines.push(`      * ... and ${issue.moreDetails} more`);

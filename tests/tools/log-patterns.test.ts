@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { noiseKind, normalizeLogLine, normalizePorts } from "../../src/tools/log-patterns.js";
+import { noiseKind, normalizeLogLine } from "../../src/tools/log-patterns.js";
 
 describe("normalizeLogLine", () => {
   const same = (a: string, b: string) => expect(normalizeLogLine(a)).toBe(normalizeLogLine(b));
@@ -85,10 +85,3 @@ describe("noiseKind", () => {
   });
 });
 
-describe("normalizePorts", () => {
-  it("collapses ports only", () => {
-    expect(normalizePorts("port-forward 127.0.0.1:34567 -> 15000 failed")).toBe(normalizePorts("port-forward 127.0.0.1:41234 -> 15000 failed"));
-    expect(normalizePorts("forwarding from localhost:40001")).toBe(normalizePorts("forwarding from localhost:40002"));
-    expect(normalizePorts("pod istiod-a failed")).not.toBe(normalizePorts("pod istiod-b failed"));
-  });
-});

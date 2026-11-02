@@ -119,10 +119,3 @@ export function noiseKind(line: string): string | null {
   for (const { kind, re } of NOISE) if (re.test(line)) return kind;
   return null;
 }
-
-const PORT_ONLY_RE = /(?<=[\w\]]):\d{2,5}\b/g;
-
-/** Collapses port numbers only (host:port), for messages whose other tokens identify the problem. */
-export function normalizePorts(message: string): string {
-  return message.replace(PORT_ONLY_RE, ":<PORT>");
-}

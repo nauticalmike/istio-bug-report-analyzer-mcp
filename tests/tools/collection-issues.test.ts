@@ -123,7 +123,24 @@ describe("parseCollectionIssues port variants", () => {
     const issues = parseCollectionIssues(lines.join("\n"));
     expect(issues).toHaveLength(1);
     expect(issues[0]).toMatchObject({ message: lines[0].replace(/^\S+\terror\t/, ""), count: 51, variants: 50 });
-    expect(formatCollectionIssues(issues)[1]).toMatch(/\(x51, 50 variants differing only in port\)$/);
+    expect(formatCollectionIssues(issues)[1]).toMatch(/\(x51, 50 variants differing only in ports\/ids\)$/);
+  });
+
+  it("collapses port-forward lines that differ in bare port numbers and container ids", () => {
+    const hex = (i: number) => i.toString(16).padStart(8, "0").repeat(8);
+    const line = (i: number) =>
+      `2026-10-20T20:23:09.000000Z\terror\tan error occurred forwarding ${40000 + i} -> 15000: error forwarding port 15000 to pod ${hex(i)}, uid : exit status 1`;
+    const issues = parseCollectionIssues(Array.from({ length: 30 }, (_, i) => line(i)).join("\n"));
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ count: 30, variants: 30 });
+  });
+
+  it("keeps the first message's text while grouping on the normalized key", () => {
+    const issues = parseCollectionIssues(
+      ["2026-10-20T20:23:09.000000Z\terror\ttimeout after 5s for pod shop/cart-7d9f8b6c4d-x2k9p", "2026-10-20T20:23:10.000000Z\terror\ttimeout after 7s for pod shop/cart-7d9f8b6c4d-q8z4w"].join("\n"),
+    );
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toBe("timeout after 5s for pod shop/cart-7d9f8b6c4d-x2k9p");
   });
 
   it("keeps messages that differ in more than ports apart", () => {
