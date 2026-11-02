@@ -53,7 +53,7 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "load_bug_report",
-    "Load an existing istioctl bug-report archive (.tar.gz) or pre-extracted directory for analysis. Archives are extracted to a temporary directory after a free-space check; it is deleted when another report is loaded or the server exits. Warns up front, from file sizes, when a cluster dump will not fit in the server heap.",
+    "Load an existing istioctl bug-report archive (.tar.gz) or pre-extracted directory for analysis. Archives are extracted to a temporary directory after a free-space check; it is deleted when another report is loaded or the server exits. Gives a data-completeness verdict and warns up front, from file sizes, when a cluster dump will not fit in the server heap.",
     {
       path: z.string().describe("Path to .tar.gz archive or pre-extracted directory"),
       extract_dir: z.string().optional().describe("Existing directory to extract a .tar.gz into (default: the system temp directory). Use a larger volume for big archives."),
@@ -150,7 +150,7 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "get_overview",
-    "Get a high-level overview of the loaded bug report: versions, pod counts, analyze result summary, and cluster dump size warnings",
+    "Get a high-level overview of the loaded bug report: versions, pod counts (and proxy dirs with no live pod), analyze result summary, data-completeness verdict, and cluster dump size warnings",
     {},
     async () => {
       const store = getStore();
@@ -172,7 +172,7 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "run_diagnostics",
-    "Run built-in diagnostic templates against the loaded bug report to find known issues",
+    "Run built-in diagnostic templates against the loaded bug report to find known issues. Output starts with the data-completeness verdict: findings that rely on missing data may be absent or wrong.",
     {
       categories: z.string().optional().describe("Comma-separated categories to check (e.g. 'version,config'). Omit for all."),
     },

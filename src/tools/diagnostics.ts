@@ -2,6 +2,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DiagnosticEngine } from "../diagnostics/engine.js";
 import type { BugReportStore } from "../archive/store.js";
+import { formatCompleteness } from "../archive/completeness.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = join(__dirname, "..", "..", "templates");
@@ -16,17 +17,20 @@ export async function runDiagnostics(
   const categories = params.categories?.split(",").map((c) => c.trim());
   const modeInfo = store.detectDataPlaneMode();
   const findings = await engine.run(store, categories, modeInfo.mode);
+  // First, so "no issues" is never read without knowing what data the checks had.
+  const completeness = [...formatCompleteness(store.getCompleteness()), ""];
 
   if (findings.length === 0) {
     return {
       content: [{
         type: "text" as const,
-        text: "Diagnostic scan complete. No issues detected by built-in templates.",
+        text: [...completeness, "Diagnostic scan complete. No issues detected by built-in templates."].join("\n"),
       }],
     };
   }
 
   const lines = [
+    ...completeness,
     `=== Diagnostic Results: ${findings.length} findings (mode: ${modeInfo.mode}) ===`,
     "",
   ];

@@ -9,6 +9,7 @@ import {
   freeBytes as statFreeBytes,
   type ExtractionTracker,
 } from "../archive/extraction.js";
+import { formatCompleteness } from "../archive/completeness.js";
 import type { Session } from "../types.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 import { clusterPreCheckLines } from "./cluster-warnings.js";
@@ -129,6 +130,8 @@ export async function loadBugReport(
       `Proxies: ${proxyPods.length} pods`,
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
+      "",
+      ...formatCompleteness(store.getCompleteness()),
     ];
     // From file sizes only: a dump too large for the heap is reported now, not at the first cluster tool.
     const preCheck = clusterPreCheckLines(store);
