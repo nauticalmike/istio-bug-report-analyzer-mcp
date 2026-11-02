@@ -158,7 +158,15 @@ export type SignalSource =
   | { type: "istiod"; endpoint: string; path: string }
   | { type: "version" }
   | { type: "version_skew" }
-  | { type: "version_support"; supported: string[]; supportedSolo?: string[] }
+  | {
+      type: "version_support";
+      supported: string[];
+      supportedSolo?: string[];
+      /** Upstream end-of-life day (YYYY-MM-DD) per minor, to judge support as of the capture date. */
+      endOfLife?: Record<string, string>;
+      /** Upstream release day (YYYY-MM-DD) per minor (dates the Solo n-4 window). */
+      released?: Record<string, string>;
+    }
   | { type: "envoyfilter_risks" }
   | { type: "demo_profile" }
   | { type: "istiod_replicas" };

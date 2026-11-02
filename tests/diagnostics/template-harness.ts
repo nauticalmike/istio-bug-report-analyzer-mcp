@@ -1,11 +1,11 @@
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { BugReportStore } from "../../src/archive/store.js";
 import { DiagnosticEngine } from "../../src/diagnostics/engine.js";
-import type { DiagnosticFinding } from "../../src/types.js";
+import type { DataPlaneMode, DiagnosticFinding } from "../../src/types.js";
 
 export const TEMPLATES_DIR = join(import.meta.dirname, "..", "..", "templates");
 
@@ -23,6 +23,10 @@ export interface ArchiveSpec {
   istiodPods?: string[];
   /** Removes cluster/pods so the archive has no pod dump at all. */
   noPodDump?: boolean;
+  /** Extra archive files by relative path, written last; null removes the file. */
+  files?: Record<string, string | null>;
+  /** Data plane mode passed to the engine (templates' appliesTo is ignored when unset). */
+  mode?: DataPlaneMode;
 }
 
 const tempDirs: string[] = [];
@@ -31,8 +35,8 @@ export async function cleanupArchives(): Promise<void> {
   await Promise.all(tempDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 }
 
-/** Builds a minimal archive per spec and runs the shipped templates for the given categories. */
-export async function runTemplates(spec: ArchiveSpec, categories: string[]): Promise<DiagnosticFinding[]> {
+/** Builds a minimal archive per spec and runs the shipped templates; the engine keeps the run's not-evaluated list. */
+export async function runEngine(spec: ArchiveSpec, categories: string[]): Promise<{ findings: DiagnosticFinding[]; engine: DiagnosticEngine }> {
   const tempDir = await mkdtemp(join(tmpdir(), "template-harness-"));
   tempDirs.push(tempDir);
   const archiveDir = join(tempDir, "bug-report");
@@ -54,10 +58,25 @@ export async function runTemplates(spec: ArchiveSpec, categories: string[]): Pro
       await writeFile(join(dir, "discovery.log"), "info\tready\n");
     }
   }
+  for (const [path, content] of Object.entries(spec.files ?? {})) {
+    const file = join(archiveDir, path);
+    if (content === null) {
+      await rm(file, { force: true });
+    } else {
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(file, content);
+    }
+  }
   const store = await BugReportStore.fromDirectory(archiveDir);
   const engine = new DiagnosticEngine();
   await engine.loadTemplates(TEMPLATES_DIR);
-  return engine.run(store, categories);
+  const findings = await engine.run(store, categories, spec.mode);
+  return { findings, engine };
+}
+
+/** Builds a minimal archive per spec and runs the shipped templates for the given categories. */
+export async function runTemplates(spec: ArchiveSpec, categories: string[]): Promise<DiagnosticFinding[]> {
+  return (await runEngine(spec, categories)).findings;
 }
 
 export function finding(findings: DiagnosticFinding[], id: string): DiagnosticFinding | undefined {

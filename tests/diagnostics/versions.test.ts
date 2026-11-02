@@ -105,3 +105,40 @@ describe("findUnsupportedVersions", () => {
     expect(findUnsupportedVersions(info(["1.31.2", "unknown"], [], "1.30.6"), supported)).toEqual([]);
   });
 });
+
+describe("findUnsupportedVersions as of the capture date", () => {
+  const supported = ["1.30", "1.31"];
+  const supportedSolo = ["1.27", "1.28", "1.29", "1.30", "1.31"];
+  const endOfLife = { "1.26": "2025-12-22", "1.27": "2026-04-07", "1.28": "2026-07-01", "1.29": "2026-10-15" };
+  const released = { "1.24": "2024-11-07", "1.25": "2025-03-03", "1.26": "2025-05-08", "1.27": "2025-08-11", "1.28": "2025-11-05", "1.29": "2026-02-16", "1.30": "2026-05-14", "1.31": "2026-08-27" };
+  const at = (iso: string) => ({ asOf: new Date(`${iso}T12:00:00Z`), endOfLife, released });
+
+  it("accepts a minor that was still supported on the capture date", () => {
+    expect(findUnsupportedVersions(info(["1.29.9"], []), supported, undefined, at("2026-09-01"))).toEqual([]);
+  });
+
+  it("flags a minor past end of life on the capture date and names the date used", () => {
+    const issues = findUnsupportedVersions(info(["1.28.10"], []), supported, undefined, at("2026-09-01"));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].detail).toContain("control plane (default) 1.28.10 was not a supported Istio minor on 2026-09-01");
+    expect(issues[0].detail).toContain("capture date");
+    expect(issues[0].detail).toContain("supported then: 1.29, 1.30, 1.31");
+  });
+
+  it("shifts the Solo n-4 window back to the newest minor released by the capture date", () => {
+    // On 2025-12-01 the newest minor was 1.28, so the n-4 window was 1.24 through 1.28.
+    expect(findUnsupportedVersions(info(["1.25.4-solo"], []), supported, supportedSolo, at("2025-12-01"))).toEqual([]);
+    const issues = findUnsupportedVersions(info(["1.23.6-solo"], []), supported, supportedSolo, at("2025-12-01"));
+    expect(issues[0].detail).toContain("supported then: 1.24, 1.25, 1.26, 1.27, 1.28");
+  });
+
+  it("says the window is today's when no capture date is known", () => {
+    const issues = findUnsupportedVersions(info(["1.28.10"], []), supported, undefined, { endOfLife, released });
+    expect(issues[0].detail).toContain("as of today: no log timestamp found in the archive");
+  });
+
+  it("reports an old client on its own as info, an old control plane as a warning", () => {
+    const issues = findUnsupportedVersions(info(["1.26.1"], [], "1.26.1"), supported, undefined, at("2026-09-01"));
+    expect(issues.map((i) => i.severity)).toEqual(["info", "warning"]);
+  });
+});

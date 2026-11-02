@@ -8,6 +8,7 @@ export interface Minor {
 export interface VersionIssue {
   kind: "data-plane-ahead" | "data-plane-behind" | "unsupported-skew" | "unsupported-version";
   detail: string;
+  severity?: "warning" | "info";
 }
 
 export function parseMinor(version: string | null | undefined): Minor | null {
@@ -87,36 +88,75 @@ export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
   return issues;
 }
 
+export interface SupportDates {
+  /** When the archive was captured; support is judged as of this day. Unset: today's windows. */
+  asOf?: Date;
+  /** Upstream end-of-life day (YYYY-MM-DD) per minor that has left the supported list. */
+  endOfLife?: Record<string, string>;
+  /** Upstream release day (YYYY-MM-DD) per minor. */
+  released?: Record<string, string>;
+}
+
+function newestMinor(minors: string[]): Minor | undefined {
+  return minors.map(parseMinor).filter((w): w is Minor => w !== null).sort((a, b) => distance(b, a))[0];
+}
+
+function sortMinors(minors: Iterable<string>): string[] {
+  return [...new Set(minors)].sort((a, b) => distance(parseMinor(a)!, parseMinor(b)!));
+}
+
+/**
+ * The support window on `day`. `current` is today's window. Upstream: today's minors plus
+ * those whose end of life was on or after the day. Solo (n-4): the four minors before the
+ * newest one released by the day, unless that is already today's newest.
+ */
+function windowOn(current: string[], solo: boolean, day: string, dates: SupportDates): string[] {
+  const releasedBy = (m: string) => !dates.released?.[m] || dates.released[m] <= day;
+  if (!solo) {
+    const stillSupported = Object.entries(dates.endOfLife ?? {}).filter(([m, eol]) => eol >= day && releasedBy(m)).map(([m]) => m);
+    return sortMinors([...current.filter(releasedBy), ...stillSupported]);
+  }
+  const n = newestMinor(Object.keys(dates.released ?? {}).filter((m) => dates.released![m] <= day));
+  const today = newestMinor(current);
+  if (!n || (today && distance(n, today) >= 0)) return current;
+  return Array.from({ length: 5 }, (_, i) => n.minor - 4 + i).filter((minor) => minor >= 0).map((minor) => `${n.major}.${minor}`);
+}
+
 /**
  * Community builds are checked against the upstream window; `-solo` builds against Solo's
- * (longer, n-4) window when one is given, and are skipped otherwise.
+ * (longer, n-4) window when one is given, and are skipped otherwise. With `dates.asOf`
+ * (the capture date) the windows are those of that day. An unsupported istioctl client
+ * alone is info (it only affects collection); an unsupported control plane is a warning.
  */
 export function findUnsupportedVersions(
   versions: VersionInfo | null,
   supported: string[],
   supportedSolo?: string[],
+  dates: SupportDates = {},
 ): VersionIssue[] {
   if (!versions) return [];
-  const checks: { role: string; version: string | null }[] = [
-    { role: "client (istioctl)", version: versions.clientVersion },
-    ...versions.controlPlaneVersions.map((v) => ({ role: `control plane (${v.revision})`, version: v.version })),
+  const checks: { role: string; version: string | null; severity: "info" | "warning" }[] = [
+    { role: "client (istioctl)", version: versions.clientVersion, severity: "info" },
+    ...versions.controlPlaneVersions.map((v) => ({ role: `control plane (${v.revision})`, version: v.version, severity: "warning" as const })),
   ];
+  const day = dates.asOf?.toISOString().slice(0, 10);
 
   const issues: VersionIssue[] = [];
-  for (const { role, version } of checks) {
+  for (const { role, version, severity } of checks) {
     const solo = version?.includes("-solo") ?? false;
     if (solo && !supportedSolo) continue;
-    const window = solo ? supportedSolo! : supported;
+    const window = day ? windowOn(solo ? supportedSolo! : supported, solo, day, dates) : solo ? supportedSolo! : supported;
     const m = parseMinor(version);
     if (!m || window.includes(label(m))) continue;
     // A minor newer than the window is newer than our data, not end of life.
-    const newest = window.map(parseMinor).filter((w): w is Minor => w !== null).sort((a, b) => distance(b, a))[0];
+    const newest = newestMinor(window);
     if (newest && distance(m, newest) > 0) continue;
     const scope = solo ? "Solo distribution of Istio minor" : "Istio minor";
-    issues.push({
-      kind: "unsupported-version",
-      detail: `${role} ${version} is not a supported ${scope} (supported: ${window.join(", ")})`,
-    });
+    const clientOnly = severity === "info" ? "; istioctl only, the mesh is not affected: collect with a supported istioctl" : "";
+    const detail = day
+      ? `${role} ${version} was not a supported ${scope} on ${day} (capture date, the newest log timestamp in the archive; supported then: ${window.join(", ")}${clientOnly})`
+      : `${role} ${version} is not a supported ${scope} (supported: ${window.join(", ")}; as of today: no log timestamp found in the archive${clientOnly})`;
+    issues.push({ kind: "unsupported-version", detail, severity });
   }
   return issues;
 }

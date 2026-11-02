@@ -21,10 +21,38 @@ signals:
   #   n-4 patching applies "only with a -solo distribution of Istio, not community
   #   Istio versions" (docs.solo.io/istio/1.31.x/reference/versions/, n = 1.31).
   #   Shift by one minor when Solo ships a new stable minor.
+  # Support is judged as of the capture date (the newest log timestamp in the archive):
+  # endOfLife and released are istio.io's "End of Life" and "Release Date" columns. Add a
+  # minor's end-of-life day when it leaves `supported`, and its release day when it ships;
+  # scripts/check-istio-support.mjs reports both when they drift.
   - source:
       type: version_support
       supported: ["1.30", "1.31"]
       supportedSolo: ["1.27", "1.28", "1.29", "1.30", "1.31"]
+      endOfLife:
+        "1.20": "2024-06-25"
+        "1.21": "2024-09-27"
+        "1.22": "2025-01-22"
+        "1.23": "2025-04-16"
+        "1.24": "2025-06-24"
+        "1.25": "2025-09-30"
+        "1.26": "2025-12-22"
+        "1.27": "2026-04-07"
+        "1.28": "2026-07-01"
+        "1.29": "2026-10-15"
+      released:
+        "1.20": "2023-11-14"
+        "1.21": "2024-03-13"
+        "1.22": "2024-05-13"
+        "1.23": "2024-08-14"
+        "1.24": "2024-11-07"
+        "1.25": "2025-03-03"
+        "1.26": "2025-05-08"
+        "1.27": "2025-08-11"
+        "1.28": "2025-11-05"
+        "1.29": "2026-02-16"
+        "1.30": "2026-05-14"
+        "1.31": "2026-08-27"
     check:
       op: exists
 remediation:

@@ -98,6 +98,17 @@ const CLUSTER_DUMP_FILES = [
   "cluster/pods",
 ];
 
+const LOG_TAIL_BYTES = 16 * 1024;
+const MAX_CAPTURE_LOGS = 500;
+// RFC 3339 UTC timestamps as Istio, Envoy and istioctl log them (2026-03-18T10:00:02.123456Z).
+const LOG_TIMESTAMP_RE = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/g;
+
+function logRank(path: string): number {
+  if (path === "bug-report.log") return 0;
+  if (path.startsWith("istio/")) return 1;
+  return 2;
+}
+
 function resourceKey(r: ParsedResource): string {
   return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
 }
@@ -115,6 +126,7 @@ export class BugReportStore {
   private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
   private effectiveVersions: VersionInfo | null | undefined = undefined;
+  private captureTime: Date | null | undefined = undefined;
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
@@ -324,6 +336,32 @@ export class BugReportStore {
     if (!needsImageFallback(this.versions) && !this.isClusterResourcesParsed()) return this.versions;
     this.effectiveVersions = withImageFallback(this.versions, this.getClusterResources({ kind: "Pod" }));
     return this.effectiveVersions;
+  }
+
+  /**
+   * When the archive was captured: the newest log timestamp in the tails of bug-report.log
+   * and the istiod, proxy, CNI and operator logs (logs end at collection time). Only the last
+   * LOG_TAIL_BYTES of each file are read, at most MAX_CAPTURE_LOGS files. Timestamps more
+   * than a day after now are ignored. Null when no log line carries a timestamp.
+   */
+  getCaptureTime(): Date | null {
+    if (this.captureTime !== undefined) return this.captureTime;
+    const logs = this.index.files
+      .filter((f) => f.relativePath === "bug-report.log" || /^(istio|proxies|cni|operator)\/.*\.log$/.test(f.relativePath))
+      // bug-report.log and istiod first: they are few and always end at collection time.
+      .sort((a, b) => logRank(a.relativePath) - logRank(b.relativePath))
+      .slice(0, MAX_CAPTURE_LOGS);
+    const limit = Date.now() + 24 * 3600 * 1000;
+    let newest = -Infinity;
+    for (const f of logs) {
+      const tail = this.readFileRange(f.relativePath, Math.max(0, f.size - LOG_TAIL_BYTES), LOG_TAIL_BYTES)?.text ?? "";
+      for (const m of tail.matchAll(LOG_TIMESTAMP_RE)) {
+        const t = Date.parse(m[1]);
+        if (t > newest && t <= limit) newest = t;
+      }
+    }
+    this.captureTime = Number.isFinite(newest) ? new Date(newest) : null;
+    return this.captureTime;
   }
 
   getAnalyzeResults(filter?: { severity?: string; code?: string }): AnalyzeResult[] {

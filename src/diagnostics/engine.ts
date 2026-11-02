@@ -5,7 +5,9 @@ import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } fro
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
-import { demoProfileEvidence, riskyEnvoyFilters, singleReplicaIstiods, type Issue } from "./checks.js";
+import { demoProfileEvidence, riskyEnvoyFilters, singleReplicaIstiods, type Issue, type Severity } from "./checks.js";
+
+const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 
 // Sources that compute a list of issues: the signal value is the list (null when empty)
 // and each issue's detail is reported as an affected resource.
@@ -13,7 +15,11 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   version_skew: (store) => findVersionSkew(store.getEffectiveVersions()),
   version_support: (store, source) =>
     source.type === "version_support"
-      ? findUnsupportedVersions(store.getEffectiveVersions(), source.supported ?? [], source.supportedSolo)
+      ? findUnsupportedVersions(store.getEffectiveVersions(), source.supported ?? [], source.supportedSolo, {
+          asOf: store.getCaptureTime() ?? undefined,
+          endOfLife: source.endOfLife,
+          released: source.released,
+        })
       : [],
   envoyfilter_risks: (store) => riskyEnvoyFilters(store),
   demo_profile: (store) => demoProfileEvidence(store),
@@ -80,7 +86,7 @@ export class DiagnosticEngine {
           templateId: template.id,
           templateName: template.name,
           category: template.category,
-          severity: template.severity,
+          severity: this.findingSeverity(template, store, issueCache),
           affectedResources: this.collectAffectedResources(template, store, issueCache),
           description: template.description,
           rootCause: template.rootCause,
@@ -169,6 +175,14 @@ export class DiagnosticEngine {
       default:
         return null;
     }
+  }
+
+  /** The template's severity, lowered to the most severe issue when every issue states one. */
+  private findingSeverity(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): Severity {
+    const issues = template.signals.flatMap((s) => issuesFor(s.source, store, cache) ?? []);
+    if (issues.length === 0 || issues.some((i) => !i.severity)) return template.severity;
+    const worst = issues.reduce<Severity>((w, i) => (SEVERITY_RANK[i.severity!] > SEVERITY_RANK[w] ? i.severity! : w), "info");
+    return SEVERITY_RANK[worst] < SEVERITY_RANK[template.severity] ? worst : template.severity;
   }
 
   private collectAffectedResources(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): string[] {

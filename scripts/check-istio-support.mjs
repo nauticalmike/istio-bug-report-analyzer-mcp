@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Fails when DIAG-006's upstream support window drifts from istio.io's support table.
+// Fails when DIAG-006's upstream support window or its release / end-of-life dates drift from istio.io's support table.
 // Usage: node scripts/check-istio-support.mjs [--html <saved page>] [--template <yaml>]
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -14,24 +14,81 @@ const cellText = (html) =>
 
 const cells = (row, tag) => [...row.matchAll(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, "g"))].map((m) => cellText(m[1]));
 
-/** Minors marked "Yes" in the "Currently Supported" column, sorted ascending. */
-export function parseSupportedMinors(html) {
+/** Rows of the support table as { header text: cell text }, for minor-version rows only. */
+function supportRows(html) {
   for (const [table] of html.matchAll(/<table[\s\S]*?<\/table>/g)) {
     const rows = [...table.matchAll(/<tr[\s\S]*?<\/tr>/g)].map((m) => m[0]);
     const header = rows.length > 0 ? cells(rows[0], "th") : [];
-    const versionCol = header.findIndex((h) => /^version$/i.test(h));
-    const supportedCol = header.findIndex((h) => /currently supported/i.test(h));
-    if (versionCol < 0 || supportedCol < 0) continue;
-
-    const supported = [];
-    for (const row of rows.slice(1)) {
+    if (!header.some((h) => /^version$/i.test(h)) || !header.some((h) => /currently supported/i.test(h))) continue;
+    const named = (data, re) => data[header.findIndex((h) => re.test(h))] ?? "";
+    return rows.slice(1).map((row) => {
       const data = cells(row, "td");
-      const version = data[versionCol] ?? "";
-      if (/^\d+\.\d+$/.test(version) && /^yes\b/i.test(data[supportedCol] ?? "")) supported.push(version);
-    }
-    return sortMinors(supported);
+      return {
+        version: named(data, /^version$/i),
+        supported: named(data, /currently supported/i),
+        released: named(data, /^release date$/i),
+        endOfLife: named(data, /^end of life$/i),
+      };
+    }).filter((r) => /^\d+\.\d+$/.test(r.version));
   }
   throw new Error(`Istio support table not found at ${SUPPORTED_RELEASES_URL}; the page layout may have changed.`);
+}
+
+/** Minors marked "Yes" in the "Currently Supported" column, sorted ascending. */
+export function parseSupportedMinors(html) {
+  return sortMinors(supportRows(html).filter((r) => /^yes\b/i.test(r.supported)).map((r) => r.version));
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/** "Aug 27, 2026", "Sept 30, 2025", "April 7, 2026" -> YYYY-MM-DD; null for "~Feb 2027 (Expected)" and the like. */
+function isoDay(text) {
+  const m = /^([A-Za-z]+)\.?\s+(\d{1,2}),\s*(\d{4})$/.exec(text.trim());
+  const month = m ? MONTHS.indexOf(m[1].slice(0, 3).toLowerCase()) : -1;
+  if (month < 0) return null;
+  return `${m[3]}-${String(month + 1).padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+}
+
+/** Release and end-of-life days per minor from the support table (expected dates are skipped). */
+export function parseSupportDates(html) {
+  const released = {};
+  const endOfLife = {};
+  for (const row of supportRows(html)) {
+    const r = isoDay(row.released);
+    const e = isoDay(row.endOfLife);
+    if (r) released[row.version] = r;
+    if (e) endOfLife[row.version] = e;
+  }
+  return { released, endOfLife };
+}
+
+/** The `released` and `endOfLife` tables from the DIAG-006 version_support signal. */
+export function readTemplateDates(templateText) {
+  const template = yaml.load(templateText);
+  const source = template?.signals?.find((s) => s?.source?.type === "version_support")?.source ?? {};
+  return { released: source.released ?? {}, endOfLife: source.endOfLife ?? {} };
+}
+
+/**
+ * Every upstream date for a minor at or after the oldest one a template table tracks must
+ * be in that table with the same day.
+ */
+export function compareDates(upstream, template) {
+  const problems = [];
+  for (const kind of ["released", "endOfLife"]) {
+    const tracked = sortMinors(Object.keys(template[kind]));
+    if (tracked.length === 0) continue;
+    const oldest = tracked[0].split(".").map(Number);
+    for (const minor of sortMinors(Object.keys(upstream[kind]))) {
+      const [maj, min] = minor.split(".").map(Number);
+      if (maj < oldest[0] || (maj === oldest[0] && min < oldest[1])) continue;
+      const want = upstream[kind][minor];
+      const have = template[kind][minor];
+      if (!have) problems.push(`${kind}["${minor}"] is missing (istio.io: ${want})`);
+      else if (have !== want) problems.push(`${kind}["${minor}"] is ${have}, istio.io says ${want}`);
+    }
+  }
+  return { ok: problems.length === 0, problems };
 }
 
 /** The upstream `supported` list from the DIAG-006 version_support signal. */
@@ -86,18 +143,21 @@ async function main(args) {
 
   const upstream = parseSupportedMinors(html);
   if (upstream.length === 0) throw new Error("istio.io lists no supported minors; refusing to compare.");
-  const template = readTemplateWindow(readFileSync(templateFile, "utf8"));
+  const templateText = readFileSync(templateFile, "utf8");
+  const template = readTemplateWindow(templateText);
   const result = compareWindows(upstream, template);
+  const dates = compareDates(parseSupportDates(html), readTemplateDates(templateText));
 
   console.log(`istio.io supported minors: ${upstream.join(", ")}`);
   console.log(`DIAG-006 supported list:   ${template.join(", ")}`);
-  if (result.ok) {
-    console.log("OK: DIAG-006 matches the upstream support window.");
+  if (result.ok && dates.ok) {
+    console.log("OK: DIAG-006 matches the upstream support window and dates.");
     return 0;
   }
   if (result.added.length) console.log(`Add to DIAG-006: ${result.added.join(", ")}`);
   if (result.removed.length) console.log(`Remove from DIAG-006 (now EOL): ${result.removed.join(", ")}`);
-  console.log(`Update "supported" (and the "Last verified" date) in ${templateFile}.`);
+  for (const p of dates.problems) console.log(`DIAG-006 ${p}`);
+  console.log(`Update "supported", "released", "endOfLife" (and the "Last verified" date) in ${templateFile}.`);
   console.log("Also check supportedSolo against https://docs.solo.io/istio/latest/reference/versions/ (n-4).");
   return 1;
 }

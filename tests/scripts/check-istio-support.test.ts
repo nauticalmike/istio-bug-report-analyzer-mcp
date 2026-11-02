@@ -5,6 +5,9 @@ import {
   parseSupportedMinors,
   readTemplateWindow,
   compareWindows,
+  parseSupportDates,
+  readTemplateDates,
+  compareDates,
 } from "../../scripts/check-istio-support.mjs";
 
 const root = join(import.meta.dirname, "..", "..");
@@ -42,5 +45,31 @@ describe("compareWindows", () => {
 
   it("reports minors to add and remove", () => {
     expect(compareWindows(["1.31", "1.32"], ["1.30", "1.31"])).toEqual({ ok: false, added: ["1.32"], removed: ["1.30"] });
+  });
+});
+
+describe("support dates (DIAG-006 judges support as of the capture date)", () => {
+  it("reads release and end-of-life days, skipping expected dates", () => {
+    const dates = parseSupportDates(snapshot);
+    expect(dates.released["1.31"]).toBe("2026-08-27");
+    expect(dates.released["1.25"]).toBe("2025-03-03");
+    expect(dates.endOfLife["1.29"]).toBe("2026-10-15");
+    expect(dates.endOfLife["1.25"]).toBe("2025-09-30");
+    expect(dates.endOfLife["1.27"]).toBe("2026-04-07");
+    expect(dates.endOfLife["1.31"]).toBeUndefined();
+  });
+
+  it("the template's tables match the istio.io snapshot", () => {
+    expect(compareDates(parseSupportDates(snapshot), readTemplateDates(template))).toEqual({ ok: true, problems: [] });
+  });
+
+  it("reports a missing or different date for minors the template tracks", () => {
+    const upstream = { released: { "1.31": "2026-08-27", "1.32": "2026-11-20" }, endOfLife: { "1.28": "2026-07-01", "1.29": "2026-10-15" } };
+    const tmpl = { released: { "1.31": "2026-08-27" }, endOfLife: { "1.28": "2026-07-02" } };
+    expect(compareDates(upstream, tmpl).problems).toEqual([
+      'released["1.32"] is missing (istio.io: 2026-11-20)',
+      'endOfLife["1.28"] is 2026-07-02, istio.io says 2026-07-01',
+      'endOfLife["1.29"] is missing (istio.io: 2026-10-15)',
+    ]);
   });
 });

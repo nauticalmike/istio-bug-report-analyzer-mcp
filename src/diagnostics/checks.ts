@@ -4,7 +4,14 @@ import type { ParsedResource } from "../types.js";
 
 export interface Issue {
   detail: string;
+  /**
+   * When every issue behind a finding sets this, the finding takes the most severe of them
+   * (never above the template's severity), e.g. an old istioctl client alone is only info.
+   */
+  severity?: Severity;
 }
+
+export type Severity = "critical" | "warning" | "info";
 
 type Obj = Record<string, unknown>;
 

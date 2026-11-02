@@ -57,9 +57,10 @@ describe("DIAG-001 version skew template", () => {
   });
 });
 
+// The fixture's log timestamps date the capture 2026-03-18; support is judged as of then.
 describe("DIAG-006 unsupported Istio version template", () => {
   it("fires when the control plane runs an end-of-life minor", async () => {
-    expect(await findingIdsFor(versions("1.28.10", "1.28.10"))).toContain("DIAG-006");
+    expect(await findingIdsFor(versions("1.26.8", "1.26.8"))).toContain("DIAG-006");
   });
 
   it("does not fire on a supported minor", async () => {
@@ -71,6 +72,6 @@ describe("DIAG-006 unsupported Istio version template", () => {
   });
 
   it("fires on a Solo build older than the n-4 window", async () => {
-    expect(await findingIdsFor(versions("1.26.8-solo", "1.26.8-solo"))).toContain("DIAG-006");
+    expect(await findingIdsFor(versions("1.24.6-solo", "1.24.6-solo"))).toContain("DIAG-006");
   });
 });
