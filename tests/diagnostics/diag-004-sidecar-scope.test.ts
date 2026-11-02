@@ -54,6 +54,16 @@ describe("DIAG-004 Sidecar scoping coverage", () => {
     expect(skipped?.reason).toBe("skipped: 13 sidecar proxies, below the 20 where Sidecar scoping pays off");
   });
 
+  it("does not count ztunnel pods or unrendered (image: auto) proxies as sidecars", async () => {
+    const ztunnels = Array.from({ length: 25 }, (_, i) =>
+      pod("istio-system", `ztunnel-${i}`, { app: "ztunnel" }, [{ name: "istio-proxy", image: "docker.io/istio/ztunnel:1.31.2", args: ["proxy", "ztunnel"] }]),
+    );
+    const auto = Array.from({ length: 10 }, (_, i) => pod("edge", `gw-${i}`, { app: "gw" }, [{ name: "istio-proxy", image: "auto" }]));
+    const { f, skipped } = await run([...ztunnels, ...auto, ...sidecars("shop", 5)], crs(virtualService));
+    expect(f).toBeUndefined();
+    expect(skipped?.reason).toBe("skipped: 6 sidecar proxies, below the 20 where Sidecar scoping pays off");
+  });
+
   it("reports each sidecar namespace without a Sidecar resource", async () => {
     const resources = [...sidecars("shop", 15), ...sidecars("cart", 25)];
     const { f } = await run(resources, crs(virtualService, sidecarResource("shop", "default")));

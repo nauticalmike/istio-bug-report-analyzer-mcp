@@ -269,12 +269,20 @@ function completenessReason(signal: CompletenessSignal): string {
   return `not evaluated: ${signal.summary.slice(0, cut)} (data completeness: ${signal.id})`;
 }
 
-/** The istio-proxy container's role from its args: "proxy sidecar", "proxy router", "proxy waypoint". */
+/**
+ * The istio-proxy container's role from its args ("proxy sidecar", "proxy router", "proxy
+ * waypoint"), "ztunnel" for the ztunnel DaemonSet (its container is also named istio-proxy,
+ * with `proxy ztunnel` args or a ztunnel image), else null: an injected sidecar always has
+ * explicit args, and a container with neither (e.g. `image: auto` not yet rendered) is no
+ * known role.
+ */
 function proxyRole(p: ParsedResource): string | null {
   const proxy = [...list(p.spec?.containers), ...list(p.spec?.initContainers)].map(obj).find((c) => c?.name === "istio-proxy");
   if (!proxy) return null;
   const args = list(proxy.args).filter((a): a is string => typeof a === "string");
-  return args.find((a) => a === "sidecar" || a === "router" || a === "waypoint") ?? "sidecar";
+  const role = args.find((a) => a === "sidecar" || a === "router" || a === "waypoint" || a === "ztunnel");
+  if (role) return role;
+  return typeof proxy.image === "string" && /(^|\/)ztunnel[:@]/.test(proxy.image) ? "ztunnel" : null;
 }
 
 /**

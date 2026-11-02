@@ -40,7 +40,7 @@ export async function createMinimalArchive(basePath: string): Promise<void> {
   // Every proxy and istiod dir below has its live Pod here, so the archive reads as complete.
   await writeFile(join(clusterDir, "pods"), [
     "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\nspec:\n  containers:\n    - name: discovery\n",
-    "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod-abc123\n  namespace: default\nspec:\n  containers:\n    - name: app\n    - name: istio-proxy\n",
+    "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod-abc123\n  namespace: default\nspec:\n  containers:\n    - name: app\n    - name: istio-proxy\n      args:\n        - proxy\n        - sidecar\n",
   ].join("---\n"));
   await writeFile(join(clusterDir, "secrets"), "istio-system/istio-ca-secret\nistio-system/istio-reader-service-account-token\n");
 
