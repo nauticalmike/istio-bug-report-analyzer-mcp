@@ -6,6 +6,8 @@ export interface FileEntry {
   relativePath: string;
   absolutePath: string;
   size: number;
+  /** Modification time (ms); tar extraction keeps the time each file was written at collection. */
+  mtimeMs: number;
 }
 
 export interface ArchiveIndex {
@@ -60,6 +62,7 @@ async function walkDir(basePath: string, currentPath: string, files: FileEntry[]
         relativePath: relative(basePath, fullPath),
         absolutePath: fullPath,
         size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
       });
     }
   }

@@ -37,7 +37,11 @@ export async function createMinimalArchive(basePath: string): Promise<void> {
   await writeFile(join(clusterDir, "crs"), "apiVersion: networking.istio.io/v1\nkind: VirtualService\nmetadata:\n  name: test-vs\n  namespace: default\nspec:\n  hosts:\n    - test.example.com\n");
   await writeFile(join(clusterDir, "events"), "LAST SEEN   TYPE     REASON   OBJECT   MESSAGE\n5m          Normal   Synced   pod/foo  Synced successfully\n");
   await writeFile(join(clusterDir, "nodes"), "apiVersion: v1\nkind: Node\nmetadata:\n  name: node-1\n  labels:\n    kubernetes.io/os: linux\n");
-  await writeFile(join(clusterDir, "pods"), "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\nspec:\n  containers:\n    - name: discovery\n");
+  // Every proxy and istiod dir below has its live Pod here, so the archive reads as complete.
+  await writeFile(join(clusterDir, "pods"), [
+    "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\nspec:\n  containers:\n    - name: discovery\n",
+    "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod-abc123\n  namespace: default\nspec:\n  containers:\n    - name: app\n    - name: istio-proxy\n",
+  ].join("---\n"));
   await writeFile(join(clusterDir, "secrets"), "istio-system/istio-ca-secret\nistio-system/istio-reader-service-account-token\n");
 
   // proxies/default/test-pod-abc123/
