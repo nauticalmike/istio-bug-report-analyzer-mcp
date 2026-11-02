@@ -72,14 +72,12 @@ const MAJOR_DAEMON_LOG_SHARE = 0.25;
 const MAJOR_CLIENT_MINORS_BEHIND = 2;
 // Proxy coverage: below this share of the primary data plane's pods with a proxy dir, the gap is major.
 const MIN_PROXY_COVERAGE = 0.5;
-// A shortfall is namespace-scoped when the namespaces that have dirs are covered at least this well,
+// A shortfall is namespace-scoped when the namespaces that have dirs are covered at least this well
 const MIN_SCOPED_NAMESPACE_COVERAGE = 0.8;
-// random per-pod loss would leave every namespace all-or-nothing with less than this probability,
+// and random per-pod loss would split the pods along namespace lines with less than this probability.
 const MAX_SCOPE_BY_CHANCE = 0.01;
-// and a namespace with dirs and one without each have at least this many proxy pods.
-const MIN_SCOPE_NAMESPACE_PODS = 3;
-// bug-report.log errors that lose a pod's data (exec, port-forward, RBAC), not a namespace's scope.
-const POD_COLLECTION_ERROR_RE = /\bexec\b|port-?forward|\bforbidden\b/i;
+// The subset-sum count runs up to this many namespace x pod steps; past it, see namespaceSplitByChance.
+const MAX_SPLIT_DP_STEPS = 10_000_000;
 // Collection spans shorter than this are normal and not reported.
 const MIN_REPORTED_SPAN_MS = 10 * 60 * 1000;
 
@@ -444,37 +442,77 @@ function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): Complet
 /**
  * A note when bug-report.log has exec, port-forward or forbidden errors that name a pod
  * without a proxy dir or a namespace with none: those pods were tried and failed, so the
- * shortfall is a failed collection, not a scoped one. Null when it has none.
+ * shortfall is a failed collection, not a scoped one. Null when it has none. The pods and
+ * namespaces come from every such line of the log (CollectionIssueCollector records them
+ * before lines fold into one issue), so this is a set lookup per pod, not a scan per line.
  */
 function collectionErrorsFor(store: BugReportStore, missing: PodRecord[], coveredNamespaces: Set<string>): string | null {
   const scan = store.getCollectionScan();
-  if (!scan || scan.error || missing.length === 0) return null;
-  const names = new Set(missing.map((p) => p.name));
-  const namespaces = new Set(missing.map((p) => p.namespace).filter((ns) => !coveredNamespaces.has(ns)));
-  // Namespace names are DNS labels: "<ns>/<pod>", or after "namespace". Nothing to escape.
-  const nsRe = (ns: string) => new RegExp(`(?:^|[\\s"'(=])${ns}/|\\bnamespaces?[\\s=:"']+${ns}\\b`);
-  const nsTests = [...namespaces].map((ns) => ({ ns, re: nsRe(ns) }));
-  for (const issue of scan.issues) {
-    for (const text of [issue.message, ...(issue.details ?? [])]) {
-      if (!POD_COLLECTION_ERROR_RE.test(text)) continue;
-      const pod = text.match(/[a-z0-9][a-z0-9.-]*[a-z0-9]/g)?.find((t) => names.has(t));
-      const ns = pod ? undefined : nsTests.find(({ re }) => re.test(text))?.ns;
-      if (pod || ns) {
-        return `bug-report.log has exec/port-forward/forbidden errors for pods or namespaces without a proxy dir (${pod ?? `namespace ${ns}`}): a failed collection, not a scoped one: ${text.slice(0, 200)}`;
-      }
+  const refs = scan?.podErrors;
+  if (!scan || scan.error || !refs || missing.length === 0) return null;
+  const note = (what: string, text: string) =>
+    `bug-report.log has exec/port-forward/forbidden errors for pods or namespaces without a proxy dir (${what}): a failed collection, not a scoped one: ${text}`;
+  for (const p of missing) {
+    const text = refs.pods.get(p.name);
+    if (text !== undefined) return note(p.name, text);
+  }
+  for (const p of missing) {
+    if (coveredNamespaces.has(p.namespace)) continue;
+    const text = refs.namespaces.get(p.namespace);
+    if (text !== undefined) return note(`namespace ${p.namespace}`, text);
+  }
+  // More such errors than the collector keeps: too many to be anything but a failed collection.
+  if (refs.truncated) return note("more than the log scan records", "too many exec/port-forward/forbidden errors to list");
+  return null;
+}
+
+/**
+ * The chance that random per-pod loss keeps exactly the pods of some whole namespaces, given
+ * that it keeps `k` of all pods: the number of namespace subsets whose sizes sum to k, over
+ * C(n, k) (n = all pods). Counted by a subset-sum DP over the namespace sizes in log space
+ * (log-sum-exp), so neither count overflows; by symmetry (a subset's complement) on
+ * min(k, n - k), in O(namespaces x min(k, n - k)). Past MAX_SPLIT_DP_STEPS the DP is skipped:
+ * 2^m (m = namespaces small enough to be in such a subset) bounds the count, and when that
+ * bound over C(n, k) is below MAX_SCOPE_BY_CHANCE it is returned; otherwise 1 (not scoped).
+ * The bound fails only when namespaces are about as many as the pods on the smaller side, i.e.
+ * thousands of namespaces of one or two pods, a shape where an all-or-nothing split is likely
+ * by chance anyway; with few pods per namespace C(n, k) outgrows 2^m quickly, so a large k
+ * otherwise comes out scoped.
+ */
+export function namespaceSplitByChance(sizes: number[], k: number): number {
+  const n = sizes.reduce((sum, s) => sum + s, 0);
+  if (k <= 0 || k >= n) return 1;
+  const kk = Math.min(k, n - k);
+  let logChoose = 0;
+  for (let i = 1; i <= kk; i++) logChoose += Math.log(n - kk + i) - Math.log(i);
+  const usable = sizes.filter((s) => s > 0 && s <= kk);
+  if (usable.length * kk > MAX_SPLIT_DP_STEPS) {
+    const logBound = usable.length * Math.LN2 - logChoose;
+    return logBound < Math.log(MAX_SCOPE_BY_CHANCE) ? Math.exp(logBound) : 1;
+  }
+  // logCount[t]: log of the number of subsets of the namespaces so far whose sizes sum to t.
+  const logCount = new Float64Array(kk + 1).fill(-Infinity);
+  logCount[0] = 0;
+  let reach = 0;
+  for (const s of usable) {
+    reach = Math.min(kk, reach + s);
+    for (let t = reach; t >= s; t--) {
+      const b = logCount[t - s];
+      if (b === -Infinity) continue;
+      const a = logCount[t];
+      logCount[t] = a === -Infinity ? b : a >= b ? a + Math.log1p(Math.exp(b - a)) : b + Math.log1p(Math.exp(a - b));
     }
   }
-  return null;
+  return Math.min(1, Math.exp(logCount[kk] - logChoose));
 }
 
 /**
  * The scope of a collection that left the data plane short, or null when it has none:
  * gateway-only (every gateway covered, no other proxy), or namespace-scoped: the namespaces
- * with dirs covered to MIN_SCOPED_NAMESPACE_COVERAGE, a namespace with dirs and one without
- * each holding MIN_SCOPE_NAMESPACE_PODS pods or more, and random per-pod loss (p = the share
- * covered) unlikely to make every namespace all-or-nothing: the product over namespaces of
- * p^n + (1-p)^n below MAX_SCOPE_BY_CHANCE. The archive does not record istioctl's --include
- * flags, so this is the shape, not a proof.
+ * with dirs covered to MIN_SCOPED_NAMESPACE_COVERAGE, and an all-or-nothing split along
+ * namespace lines unlikely by chance: taking those namespaces as fully covered (k = their
+ * pods), namespaceSplitByChance below MAX_SCOPE_BY_CHANCE. The archive does not record
+ * istioctl's --include flags, so this is the shape, not a proof.
  */
 function scopedCoverage(
   counted: PodRecord[],
@@ -501,13 +539,9 @@ function scopedCoverage(
   const inTotal = withDirs.reduce((sum, [, n]) => sum + n.total, 0);
   const inCovered = withDirs.reduce((sum, [, n]) => sum + n.covered, 0);
   if (none.length === 0 || withDirs.length === 0 || inCovered < MIN_SCOPED_NAMESPACE_COVERAGE * inTotal) return null;
-  if (!withDirs.some(([, n]) => n.total >= MIN_SCOPE_NAMESPACE_PODS)) return null;
-  if (!none.some((ns) => byNs.get(ns)!.total >= MIN_SCOPE_NAMESPACE_PODS)) return null;
+  const sizes = [...byNs.values()].map((n) => n.total);
+  if (namespaceSplitByChance(sizes, inTotal) >= MAX_SCOPE_BY_CHANCE) return null;
   const covered = counted.filter(hasDir).length;
-  const p = covered / counted.length;
-  let byChance = 1;
-  for (const [, n] of byNs) byChance *= p ** n.total + (1 - p) ** n.total;
-  if (byChance >= MAX_SCOPE_BY_CHANCE) return null;
   const pct = Math.round((100 * inCovered) / inTotal);
   return {
     summary: () =>

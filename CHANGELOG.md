@@ -92,12 +92,14 @@ the npm package (`istio-bug-report-analyzer-mcp`).
   gateway). It is a major gap only when the data plane (sidecars when the mesh has any,
   ztunnel when it has any) is under half covered and the shortfall has no scope. A
   namespace-scoped collection (the namespaces with proxy dirs at least 80% covered, others
-  none, a namespace each way with 3 or more proxy pods, and that all-or-nothing shape under
-  1% likely by random per-pod loss; no exec/port-forward/forbidden errors in
-  `bug-report.log` for the missing pods or namespaces), a gateway-only collection, or a
-  gateway/waypoint shortfall is a minor gap whose summary names the scope. A shortfall
-  spread across namespaces, including random loss over namespaces of one or two pods,
-  stays major. A dump in which no pod has `ownerReferences` has unknown owners: every pod
+  none, and that split along namespace lines under 1% likely by random per-pod loss: of the
+  ways to keep that many pods, the share that are whole namespaces; no
+  exec/port-forward/forbidden errors in `bug-report.log` for the missing pods or namespaces,
+  including `<ns>/<pod>`, `<pod>.<ns>` and `namespace <ns>` forms and lines that fold into
+  one issue), a gateway-only collection, or a gateway/waypoint shortfall is a minor gap
+  whose summary names the scope. `--include` of one 3-pod namespace in a 100-namespace
+  cluster is scoped; a shortfall spread across namespaces, including random loss over
+  one-pod namespaces, stays major. A dump in which no pod has `ownerReferences` has unknown owners: every pod
   counts as collectable instead of bare. No proxy dirs
   at all is a major gap that says nothing was collected (not a "sample"). A pod list from
   `cluster/pods` alone, with proxy dirs outside its namespaces, is "not evaluated".

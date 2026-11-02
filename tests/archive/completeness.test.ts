@@ -627,9 +627,9 @@ describe("proxy-coverage signal", () => {
     expect(s.summary).toMatch(/^3 of 14 proxy pods/);
   });
 
-  it("does not call all-or-nothing namespaces scoped when that is likely by chance (12 pods, 1 of 3 namespaces)", async () => {
-    // p = 3/12: every namespace being all-or-nothing by chance is ~3%, above the 1% cut.
-    await threeNamespaces([3, 0, 0], [3, 5, 4]);
+  it("does not call all-or-nothing namespaces scoped when that is likely by chance (6 pods, 1 of 3 namespaces)", async () => {
+    // Keeping 2 of 6 pods at random leaves a whole 2-pod namespace in 3 of C(6, 2) = 15 cases: 20%, above the 1% cut.
+    await threeNamespaces([2, 0, 0], [2, 2, 2]);
     const s = await signal();
     expect(s.status).toBe("gap");
     expect(s.minor).toBeUndefined();
@@ -651,6 +651,21 @@ describe("proxy-coverage signal", () => {
   });
 
   it("keeps random loss across two-pod namespaces major", async () => {
+    // About 30% of pods kept, one pod here and there: most namespaces with a dir are half covered.
+    const items: Obj[] = [];
+    for (let i = 0; i < 30; i++) {
+      const ns = names(`app${i}`, 2);
+      items.push(...ns.map((n) => pod(`ns${i}`, n)));
+      if (i < 15 && i % 3 !== 2) await addDir(`ns${i}`, ns[i % 2]);
+      if (i === 2) for (const n of ns) await addDir(`ns${i}`, n);
+    }
+    await writeDump(items);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+  });
+
+  it("calls whole two-pod namespaces scoped: 9 of 30 fully covered is no chance split", async () => {
     const items: Obj[] = [];
     for (let i = 0; i < 30; i++) {
       const ns = names(`app${i}`, 2);
@@ -659,8 +674,8 @@ describe("proxy-coverage signal", () => {
     }
     await writeDump(items);
     const s = await signal();
-    expect(s.status).toBe("gap");
-    expect(s.minor).toBeUndefined();
+    expect(s.minor).toBe(true);
+    expect(s.summary).toMatch(/a namespace-scoped collection/);
   });
 
   it("does not call a shortfall scoped when bug-report.log has exec errors for the namespaces without dirs", async () => {

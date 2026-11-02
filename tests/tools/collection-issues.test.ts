@@ -215,6 +215,64 @@ describe("CollectionIssueCollector distinct-issue cap", () => {
   });
 });
 
+describe("CollectionIssueCollector pod-error references", () => {
+  it("records the pods of every exec line, also those folded into one issue", () => {
+    const c = new CollectionIssueCollector();
+    c.add("Error: failed to exec in container istio-proxy of pod app0-7d9f8b6c4d-bbx2b: timeout");
+    c.add("Error: failed to exec in container istio-proxy of pod app0-7d9f8b6c4d-gbx2b: timeout");
+    expect(c.issues()).toHaveLength(1);
+    const refs = c.podErrorRefs();
+    expect(refs.pods.has("app0-7d9f8b6c4d-bbx2b")).toBe(true);
+    expect(refs.pods.has("app0-7d9f8b6c4d-gbx2b")).toBe(true);
+    expect(refs.pods.get("app0-7d9f8b6c4d-gbx2b")).toContain("gbx2b");
+  });
+
+  it("splits pod.namespace into the pod and its namespace", () => {
+    const c = new CollectionIssueCollector();
+    c.add("Error: failed to port-forward to pod app0-7d9f8b6c4d-gbx2b.ns5: EOF");
+    const refs = c.podErrorRefs();
+    expect(refs.pods.has("app0-7d9f8b6c4d-gbx2b")).toBe(true);
+    expect(refs.namespaces.has("ns5")).toBe(true);
+  });
+
+  it("takes namespaces from <ns>/<pod> and 'namespace <ns>', not from any word or host name", () => {
+    const c = new CollectionIssueCollector();
+    c.add("Error: failed to exec into pod shop/cart-7d9f8b6c4d-x2k9p: timeout");
+    c.add('Error: secrets is forbidden: User "dev" cannot list resource "secrets" in the namespace "billing"');
+    c.add("Error: exec failed: dial tcp kubernetes.default.svc:443: timeout default");
+    const refs = c.podErrorRefs();
+    expect([...refs.namespaces.keys()].sort()).toEqual(["billing", "shop"]);
+  });
+
+  it("records bullets under a multi-error header and ignores lines without exec/port-forward/forbidden", () => {
+    const c = new CollectionIssueCollector();
+    c.add("Error: 2 errors occurred:");
+    c.add("\t* exec into a-7d9f8b6c4d-x2k9p: EOF");
+    c.add("\t* exec into b-7d9f8b6c4d-x2k9p: EOF");
+    c.add("2026-10-20T20:23:09.000000Z\terror\tconnection refused for c-7d9f8b6c4d-x2k9p");
+    const refs = c.podErrorRefs();
+    expect(refs.pods.has("a-7d9f8b6c4d-x2k9p")).toBe(true);
+    expect(refs.pods.has("b-7d9f8b6c4d-x2k9p")).toBe(true);
+    expect(refs.pods.has("c-7d9f8b6c4d-x2k9p")).toBe(false);
+  });
+
+  it("keeps a bounded set and says when it stopped", () => {
+    const c = new CollectionIssueCollector();
+    for (let i = 0; i < 30_000; i++) c.add(`Error: failed to exec into pod ns/p${i}-7d9f8b6c4d-x2k9p: timeout`);
+    const refs = c.podErrorRefs();
+    expect(refs.pods.size).toBeLessThanOrEqual(20_000);
+    expect(refs.truncated).toBe(true);
+  });
+
+  it("records 10,000 long exec lines quickly", () => {
+    const c = new CollectionIssueCollector();
+    const t = performance.now();
+    for (let i = 0; i < 10_000; i++) c.add(`Error: failed to exec in container istio-proxy: ${"x".repeat(150)} forbidden for r${i} in the namespace "covered-${i % 50}"`);
+    expect(performance.now() - t).toBeLessThan(1000);
+    expect(c.podErrorRefs().namespaces.size).toBe(50);
+  });
+});
+
 describe("collection issues in tool output", () => {
   let tempDir: string;
   let archiveDir: string;

@@ -33,6 +33,30 @@ const REPEATED_SUFFIX_RE = /\s+\(repeated (\d+) times\)$/;
 // The header can follow a message prefix ("failed to ...: 1 error occurred:").
 const MULTI_ERROR_HEADER_RE = /(?:^|:\s)\d+ errors? occurred:$/;
 const DETAIL_BULLET_RE = /^\s+\*\s+(.*)$/;
+// Errors that lose one pod's data (exec, port-forward, RBAC), as opposed to a namespace's scope.
+export const POD_COLLECTION_ERROR_RE = /\bexec\b|port-?forward|\bforbidden\b/i;
+/** Pods plus namespaces remembered from such lines; past it, PodErrorRefs.truncated. */
+export const MAX_POD_ERROR_REFS = 20_000;
+// Only the start of a line is searched for names: a multi-MiB line costs no more than this.
+const MAX_REF_SCAN_CHARS = 2_000;
+const MAX_REF_TEXT_CHARS = 200;
+// DNS names (pods, namespaces, hosts); a pod.namespace token is split at its dot.
+const NAME_TOKEN_RE = /[a-z0-9][a-z0-9.-]*[a-z0-9]/g;
+const POD_NAME_RE = /^(?=.*[a-z])[a-z0-9]+(?:-[a-z0-9]+)+$/;
+// A namespace in context: "<ns>/<pod>" or "namespace <ns>" (also namespace="<ns>", namespaces: <ns>).
+const NAMESPACE_REF_RE = /(?:^|[\s"'(=])([a-z0-9][a-z0-9-]*)\/|\bnamespaces?[\s=:"']+([a-z0-9][a-z0-9-]*)/gi;
+
+/**
+ * Pod names and namespaces that exec, port-forward and forbidden lines of bug-report.log
+ * name, each with the first line naming it (cut to MAX_REF_TEXT_CHARS). Recorded per line,
+ * before lines that differ only in a pod suffix fold into one issue.
+ */
+export interface PodErrorRefs {
+  pods: Map<string, string>;
+  namespaces: Map<string, string>;
+  /** Set when more names came than MAX_POD_ERROR_REFS. */
+  truncated: boolean;
+}
 
 interface PendingIssue {
   level: LogLevel;
@@ -58,12 +82,14 @@ export class CollectionIssueCollector {
   private pending: PendingIssue | null = null;
   /** Lines (with their repeat counts) of issues not kept because MAX_COLLECTION_ISSUES was reached. */
   overflowLines = 0;
+  private readonly refs: PodErrorRefs = { pods: new Map(), namespaces: new Map(), truncated: false };
 
   add(raw: string): void {
     const untrimmed = raw.replace(/\r$/, "");
     if (this.pending) {
       const bullet = DETAIL_BULLET_RE.exec(untrimmed);
       if (bullet) {
+        this.noteRefs(bullet[1]);
         const text = bullet[1].slice(0, MAX_MESSAGE_CHARS);
         const { details } = this.pending;
         const seen = details.get(text);
@@ -88,6 +114,7 @@ export class CollectionIssueCollector {
       if (!level) return;
       message = line.replace(ISTIO_PREFIX_RE, "");
     }
+    this.noteRefs(message);
     let occurrences = 1;
     const repeated = REPEATED_SUFFIX_RE.exec(message);
     if (repeated) {
@@ -102,6 +129,36 @@ export class CollectionIssueCollector {
       return;
     }
     this.record(level, message, occurrences);
+  }
+
+  /** The pods and namespaces exec, port-forward and forbidden lines named so far. */
+  podErrorRefs(): PodErrorRefs {
+    return this.refs;
+  }
+
+  private noteRefs(line: string): void {
+    const head = line.length > MAX_REF_SCAN_CHARS ? line.slice(0, MAX_REF_SCAN_CHARS) : line;
+    if (!POD_COLLECTION_ERROR_RE.test(head)) return;
+    let text: string | undefined;
+    const keep = (map: Map<string, string>, name: string) => {
+      if (map.has(name)) return;
+      if (this.refs.pods.size + this.refs.namespaces.size >= MAX_POD_ERROR_REFS) {
+        this.refs.truncated = true;
+        return;
+      }
+      text ??= flat(head.slice(0, MAX_REF_TEXT_CHARS));
+      map.set(flat(name), text);
+    };
+    for (const token of head.match(NAME_TOKEN_RE) ?? []) {
+      const parts = token.split(".");
+      // Pods istioctl collects belong to a Deployment or DaemonSet: "<owner>-<suffix>". Words,
+      // numbers and dates are not kept, so they cannot use up the bound.
+      if (POD_NAME_RE.test(parts[0])) keep(this.refs.pods, parts[0]);
+      if (parts.length === 1) continue;
+      // <pod>.<namespace>; a host like kubernetes.default.svc has 3 parts.
+      if (parts.length === 2 && POD_NAME_RE.test(parts[0]) && parts[1]) keep(this.refs.namespaces, parts[1]);
+    }
+    for (const m of head.matchAll(NAMESPACE_REF_RE)) keep(this.refs.namespaces, (m[1] ?? m[2]).toLowerCase());
   }
 
   issues(): CollectionIssue[] {
@@ -178,6 +235,8 @@ export interface CollectionScan {
   error?: string;
   /** Lines not grouped because MAX_COLLECTION_ISSUES distinct issues were already kept. */
   overflowLines?: number;
+  /** Pods and namespaces named by exec, port-forward and forbidden lines (unset when the log could not be read). */
+  podErrors?: PodErrorRefs;
 }
 
 /**
@@ -193,7 +252,8 @@ export async function scanCollectionIssues(store: BugReportStore): Promise<Colle
     return { issues: [], error: e instanceof Error ? e.message : String(e) };
   }
   const issues = collector.issues();
-  return collector.overflowLines > 0 ? { issues, overflowLines: collector.overflowLines } : { issues };
+  const podErrors = collector.podErrorRefs();
+  return collector.overflowLines > 0 ? { issues, overflowLines: collector.overflowLines, podErrors } : { issues, podErrors };
 }
 
 const cache = new WeakMap<BugReportStore, Promise<CollectionIssue[]>>();
