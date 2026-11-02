@@ -537,10 +537,16 @@ function clientSignal(store: BugReportStore): CompletenessSignal {
   return signal("istioctl-client", "ok", `istioctl ${versions.clientVersion} is not older than the control plane`);
 }
 
+/**
+ * Proxy dirs with no live pod in the pod list. Not evaluated without a pod list or with one
+ * the scan gave up on (podListIncomplete): a pod missing from a partial list is not gone, and
+ * every check that drops stale dirs (config_dump, ztunnel/CNI logs, the overview) would drop
+ * live ones.
+ */
 export function findStaleProxyDirs(store: BugReportStore, pods: PodInventory): StaleProxyDirs {
   const proxies = store.getProxyPods();
   if (proxies.length === 0) return { evaluated: true, stale: [], unknown: [] };
-  if (!pods.available) return { evaluated: false, stale: [], unknown: [] };
+  if (!pods.available || podListIncomplete(pods)) return { evaluated: false, stale: [], unknown: [] };
   const stale: string[] = [];
   const unknown: string[] = [];
   for (const p of proxies) {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { scanClusterDumpItems, type ItemScanInfo } from "../../src/archive/namespace-scan.js";
 import { scanPodInventory } from "../../src/archive/pod-inventory.js";
-import { computeCompleteness } from "../../src/archive/completeness.js";
+import { computeCompleteness, findStaleProxyDirs } from "../../src/archive/completeness.js";
 import { BugReportStore } from "../../src/archive/store.js";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 
@@ -96,5 +96,16 @@ describe("pod inventory of a dump the scan gave up on", () => {
     }
     // The ztunnel/CNI check still reports the dirs it has, and says the pod list could not be compared.
     expect(c.signals.find((x) => x.id === "ztunnel-cni-logs")!.details.join("\n")).toMatch(/not compared against the pod list: the pod list is incomplete/);
+  });
+
+  it("does not call proxy dirs stale or drop them from other checks against a partial pod list", async () => {
+    // cluster/pods covers the proxy dir's namespace but not its pod: against this partial
+    // list the dir would read as stale.
+    await writeFile(join(archiveDir, "cluster", "pods"), "apiVersion: v1\nkind: Pod\nmetadata:\n  name: other-7d9f8b6c4d-x2k9p\n  namespace: default\n");
+    const store = await BugReportStore.fromDirectory(archiveDir);
+    const inv = scanPodInventory(files(), { heap: ROOMY, maxWholeParseBytes: 100 });
+    expect(findStaleProxyDirs(store, inv)).toEqual({ evaluated: false, stale: [], unknown: [] });
+    const c = computeCompleteness(store, inv);
+    expect(c.signals.find((x) => x.id === "proxy-config-dump")!.summary).toMatch(/every live proxy dir \(1\)/);
   });
 });
