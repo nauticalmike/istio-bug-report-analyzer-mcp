@@ -78,6 +78,17 @@ describe("normalizeLogLine", () => {
     same("lookup name=istiod failed", "lookup name=ztunnel failed");
   });
 
+  it("normalizes pod-hash and DaemonSet suffixes inside kept name= values, even without a digit", () => {
+    const opts = { keepNames: true };
+    const key = (l: string) => normalizeLogLine(l, opts);
+    expect(key("exec failed name=ztunnel-bcdfg")).toBe(key("exec failed name=ztunnel-x7k2p"));
+    expect(key('exec failed name="ztunnel-bcdfg"')).toBe(key('exec failed name="ztunnel-hjklm"'));
+    expect(key("exec failed name=cart-bcdfghjk-mnpqr")).toBe(key("exec failed name=cart-7d9f8b6c4d-x2k9p"));
+    // The workload part stays apart.
+    expect(key("exec failed name=ztunnel-bcdfg")).not.toBe(key("exec failed name=istio-cni-node-bcdfg"));
+    expect(key("exec failed name=istio-proxy")).not.toBe(key("exec failed name=istio-other"));
+  });
+
   it("keeps distinct messages distinct", () => {
     expect(normalizeLogLine("error\tfailure kind-qq")).not.toBe(normalizeLogLine("error\tfailure kind-qqq"));
     expect(normalizeLogLine("error\tca\tcertificate signing failed")).not.toBe(normalizeLogLine("error\tca\tcertificate rotation failed"));

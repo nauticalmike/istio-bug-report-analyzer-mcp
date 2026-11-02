@@ -107,7 +107,9 @@ the npm package (`istio-bug-report-analyzer-mcp`).
   are now "not evaluated" with the reason, and `ztunnel-cni-logs` notes it.
 - **Collection issues keep more apart.** `code:403` and `code:404` (a 3-digit number after
   `code:` or `status:`) are no longer read as a port and merged, and collection-issue keys
-  keep `name=` values (`name=istiod` vs `name=ztunnel`); `find_errors` still collapses `name=`.
+  keep `name=` values (`name=istiod` vs `name=ztunnel`), with a pod suffix at the end of the
+  value collapsed (`name=ztunnel-bcdfg` and `name=ztunnel-x7k2p` are one issue);
+  `find_errors` still collapses `name=`.
 - **Several report trees in one archive.** When an archive holds more than one per-cluster
   report tree (collectors that write one per cluster under a common top directory), or a
   loaded directory has no report sections of its own but holds such trees,

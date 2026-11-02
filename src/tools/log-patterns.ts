@@ -97,9 +97,16 @@ const RULES: { re: RegExp; to: string | Replacer; when?: (s: string) => boolean 
   { re: /\s+/g, to: " " },
 ];
 
-// Collection-issue keys keep name= values: "name=istiod" and "name=ztunnel" are different failures.
+// A pod-name suffix at the end of a name= value, before any closing punctuation ("ztunnel-bcdfg",
+// "cart-bcdfghjk-mnpqr"): the value is known to be a name, so a suffix without a digit counts too.
+const NAME_POD_SUFFIX_RE = new RegExp(`-${K8S}{6,10}-${K8S}{5}(?=["':.]*$)|-${K8S}{5}(?=["':.]*$)`);
+
+// Collection-issue keys keep name= values: "name=istiod" and "name=ztunnel" are different
+// failures. Their pod suffixes still collapse, so one issue per workload, not per pod.
 const RULES_KEEPING_NAMES = RULES.map((r) =>
-  r.re === KEY_VALUE_ID_RE ? { ...r, to: ((m: string, key: string) => (key === "name" ? m : `${key}=<*>`)) as Replacer } : r,
+  r.re === KEY_VALUE_ID_RE
+    ? { ...r, to: ((m: string, key: string, value: string) => (key === "name" ? `name=${value.replace(NAME_POD_SUFFIX_RE, "-<POD>")}` : `${key}=<*>`)) as Replacer }
+    : r,
 );
 
 export interface NormalizeOptions {

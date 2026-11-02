@@ -174,6 +174,15 @@ describe("parseCollectionIssues port variants", () => {
     expect(issues).toHaveLength(3);
   });
 
+  it("does not split one workload's issue by the pod suffix in a name= value (ztunnel-bcdfg style)", () => {
+    const issues = parseCollectionIssues([
+      "2026-10-20T20:23:09.000000Z\terror\tfailed to exec name=ztunnel-bcdfg: forbidden",
+      "2026-10-20T20:23:10.000000Z\terror\tfailed to exec name=ztunnel-hjklm: forbidden",
+    ].join("\n"));
+    expect(issues).toHaveLength(1);
+    expect(issues[0].count).toBe(2);
+  });
+
   it("keeps messages that differ in more than ports apart", () => {
     const issues = parseCollectionIssues([portForward(30000), portForward(30001).replace("istiod-abc", "istiod-def")].join("\n"));
     expect(issues).toHaveLength(2);
