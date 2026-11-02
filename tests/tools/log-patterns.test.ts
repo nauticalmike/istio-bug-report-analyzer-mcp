@@ -62,6 +62,22 @@ describe("normalizeLogLine", () => {
     );
   });
 
+  it("keeps an HTTP status after code: or status: (403 and 404 stay apart)", () => {
+    expect(normalizeLogLine("request failed code:403 forbidden")).not.toBe(normalizeLogLine("request failed code:404 forbidden"));
+    expect(normalizeLogLine("upstream status:503")).not.toBe(normalizeLogLine("upstream status:404"));
+    expect(normalizeLogLine("upstream Status:503")).toContain("Status:503");
+    // A port on a host name still collapses.
+    same("connect to istiod.istio-system.svc:15012 failed", "connect to istiod.istio-system.svc:443 failed");
+  });
+
+  it("keeps name= values when asked (collection-issue keys), and collapses the other ids", () => {
+    const opts = { keepNames: true };
+    expect(normalizeLogLine("list pods name=istiod failed", opts)).not.toBe(normalizeLogLine("list pods name=ztunnel failed", opts));
+    expect(normalizeLogLine("list pods ns=a name=istiod id=1 failed", opts)).toBe(normalizeLogLine("list pods ns=b name=istiod id=2 failed", opts));
+    // Without the option, name= still collapses (find_errors).
+    same("lookup name=istiod failed", "lookup name=ztunnel failed");
+  });
+
   it("keeps distinct messages distinct", () => {
     expect(normalizeLogLine("error\tfailure kind-qq")).not.toBe(normalizeLogLine("error\tfailure kind-qqq"));
     expect(normalizeLogLine("error\tca\tcertificate signing failed")).not.toBe(normalizeLogLine("error\tca\tcertificate rotation failed"));

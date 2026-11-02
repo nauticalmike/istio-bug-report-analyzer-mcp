@@ -165,6 +165,15 @@ describe("parseCollectionIssues port variants", () => {
     expect(issues[0].message).toBe("timeout after 5s for pod shop/cart-7d9f8b6c4d-x2k9p");
   });
 
+  it("keeps issues apart that differ in a name= value or an HTTP status code", () => {
+    const issues = parseCollectionIssues([
+      "2026-10-20T20:23:09.000000Z\terror\tfailed to fetch pods name=istiod: code:403",
+      "2026-10-20T20:23:10.000000Z\terror\tfailed to fetch pods name=ztunnel: code:403",
+      "2026-10-20T20:23:11.000000Z\terror\tfailed to fetch pods name=istiod: code:404",
+    ].join("\n"));
+    expect(issues).toHaveLength(3);
+  });
+
   it("keeps messages that differ in more than ports apart", () => {
     const issues = parseCollectionIssues([portForward(30000), portForward(30001).replace("istiod-abc", "istiod-def")].join("\n"));
     expect(issues).toHaveLength(2);

@@ -33,6 +33,8 @@ const HEX_ID_RE = /\b(?=[a-f0-9]*\d)[a-f0-9]{8,}\b/gi;
 const DECIMAL_RE = /(?<![\w.])\d+\.\d+(?![\w.])/g;
 const HOST_PORT_RE = /:\d{1,5}\b/g;
 const HOST_END_CHAR_RE = /[A-Za-z\]>]/;
+// "code:403", "status:404": an HTTP status, not a port, so 403 and 404 stay apart.
+const STATUS_KEY_RE = /(?:^|[^A-Za-z])(?:code|status)$/i;
 const LONG_NUMBER_RE = /(?<![\w<])\d{4,}(?![\w>])/g;
 
 function countColons(s: string): number {
@@ -85,15 +87,30 @@ const RULES: { re: RegExp; to: string | Replacer; when?: (s: string) => boolean 
   { re: DURATION_RE, to: "<DUR>" },
   { re: DECIMAL_RE, to: "<NUM>", when: (s) => s.includes(".") },
   { re: HEX_ID_RE, to: "<ID>" },
-  { re: HOST_PORT_RE, to: (m, offset, str) => (after(HOST_END_CHAR_RE, str, offset) ? ":<PORT>" : m), when: (s) => s.includes(":") },
+  {
+    re: HOST_PORT_RE,
+    to: (m, offset, str) =>
+      !after(HOST_END_CHAR_RE, str, offset) || (m.length === 4 && STATUS_KEY_RE.test(str.slice(Math.max(0, offset - 8), offset))) ? m : ":<PORT>",
+    when: (s) => s.includes(":"),
+  },
   { re: LONG_NUMBER_RE, to: "<N>" },
   { re: /\s+/g, to: " " },
 ];
 
+// Collection-issue keys keep name= values: "name=istiod" and "name=ztunnel" are different failures.
+const RULES_KEEPING_NAMES = RULES.map((r) =>
+  r.re === KEY_VALUE_ID_RE ? { ...r, to: ((m: string, key: string) => (key === "name" ? m : `${key}=<*>`)) as Replacer } : r,
+);
+
+export interface NormalizeOptions {
+  /** Keep the value of `name=` instead of collapsing it (the other key=value ids still collapse). */
+  keepNames?: boolean;
+}
+
 /** The grouping key of a log line: the same message with different volatile tokens gets the same key. */
-export function normalizeLogLine(line: string): string {
+export function normalizeLogLine(line: string, opts: NormalizeOptions = {}): string {
   let s = line.slice(0, MAX_PATTERN_INPUT_CHARS);
-  for (const { re, to, when } of RULES) {
+  for (const { re, to, when } of opts.keepNames ? RULES_KEEPING_NAMES : RULES) {
     if (when && !when(s)) continue;
     s = typeof to === "string" ? s.replace(re, to) : s.replace(re, to);
   }

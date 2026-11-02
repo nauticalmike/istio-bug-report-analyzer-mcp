@@ -120,7 +120,8 @@ export class CollectionIssueCollector {
   private record(level: LogLevel, message: string, occurrences: number, details: string[] = [], moreDetails = 0): void {
     const parts = [message, ...details];
     // Per part: normalizeLogLine reads only the first MAX_PATTERN_INPUT_CHARS of its input.
-    const key = parts.map(normalizeLogLine).join("\n");
+    // name= values stay: a failure for name=istiod is not the one for name=ztunnel.
+    const key = parts.map((part) => normalizeLogLine(part, { keepNames: true })).join("\n");
     const variant = hash(parts.join("\n"));
     const existing = this.byKey.get(key);
     if (!existing) {
