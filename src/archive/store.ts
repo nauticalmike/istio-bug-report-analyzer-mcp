@@ -125,6 +125,8 @@ const POD_TIME_RE = new RegExp(String.raw`["']?(?:creationTimestamp|startTime)["
 const DEBUG_HEAD_BYTES = 16 * 1024;
 const MAX_CAPTURE_DEBUG_FILES = 200;
 const TIME_SCAN_CHUNK = 1 << 20;
+// Longer than any match of EVENT_TIME_RE or POD_TIME_RE, so one cut by a chunk boundary is seen whole.
+const TIME_SCAN_OVERLAP = 256;
 
 /** Where getCaptureInfo found the capture time. */
 export type CaptureSource = "log" | "debug" | "events" | "pods";
@@ -149,19 +151,30 @@ function newestTimeIn(path: string | undefined, re: RegExp, limit: number): numb
       }
     };
     let n: number;
+    // Each chunk is scanned whole (with the overlap carried from the last one), so a match in the
+    // head or middle of a line longer than a chunk (a one-line JSON dump) is not lost; the
+    // expressions have no line anchors, and seeing a match twice does not change the newest.
     while ((n = readSync(fd, buf, 0, TIME_SCAN_CHUNK, null)) > 0) {
       const text = rest + buf.toString("latin1", 0, n);
-      const cut = text.lastIndexOf("\n");
-      take(cut === -1 ? "" : text.slice(0, cut));
-      rest = cut === -1 ? text.slice(-4096) : text.slice(cut + 1).slice(-4096);
+      take(text);
+      rest = text.slice(-TIME_SCAN_OVERLAP);
     }
-    take(rest);
   } catch {
     // Unreadable: no time from this file.
   } finally {
     closeSync(fd);
   }
   return newest;
+}
+
+/**
+ * The log lines istioctl wrote in front of a debug endpoint's body: the text before the first
+ * line that starts with `{` or `[`. Times inside the JSON body ("time", "ts" fields of the
+ * data) are not when the archive was captured.
+ */
+function beforeJsonBody(text: string): string {
+  const at = text.search(/^[{[]/m);
+  return at === -1 ? text : text.slice(0, at);
 }
 
 function logRank(path: string): number {
@@ -497,7 +510,7 @@ export class BugReportStore {
     let info = found(newest, "log");
     if (!info) {
       const debug = this.index.files.filter((f) => /^istio\/[^/]+\/[^/]+\/debug\//.test(f.relativePath)).slice(0, MAX_CAPTURE_DEBUG_FILES);
-      for (const f of debug) newest = Math.max(newest, newestIn(this.readFileRange(f.relativePath, 0, DEBUG_HEAD_BYTES)?.text ?? ""));
+      for (const f of debug) newest = Math.max(newest, newestIn(beforeJsonBody(this.readFileRange(f.relativePath, 0, DEBUG_HEAD_BYTES)?.text ?? "")));
       info = found(newest, "debug");
     }
     info ??= found(newestTimeIn(this.pathIndex.get("cluster/events"), EVENT_TIME_RE, limit), "events");

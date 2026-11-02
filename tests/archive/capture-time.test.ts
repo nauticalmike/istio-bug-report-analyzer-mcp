@@ -87,6 +87,29 @@ describe("BugReportStore.getCaptureTime", () => {
     expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-02T08:00:00Z"), source: "debug" });
   });
 
+  it("reads only the log lines in front of debug output, not times inside its JSON body", async () => {
+    const dir = await withoutLogTimes();
+    await writeFile(
+      join(dir, "istio", "istio-system", "istiod-abc", "debug", "push_status"),
+      '2026-04-02T08:00:00.000000Z\tinfo\tfetching\n{\n"time": "2026-04-09T00:00:00Z",\n"totalPushes": 1}\n',
+    );
+    await writeFile(join(dir, "istio", "istio-system", "istiod-abc", "debug", "syncz"), '[\n{"ts": "2026-04-10T00:00:00Z"}]\n');
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-02T08:00:00Z"), source: "debug" });
+  });
+
+  it("finds event times anywhere in a very long single-line (JSON) events dump", async () => {
+    const dir = await withoutLogTimes();
+    const filler = (n: number) => Array.from({ length: n }, (_, i) => `{"kind":"Event","metadata":{"name":"e${i}"},"note":"${"x".repeat(200)}"}`).join(",");
+    // The newest time is near the start of one 3 MB line, far from its end.
+    await writeFile(
+      join(dir, "cluster", "events"),
+      `{"kind":"List","items":[{"kind":"Event","lastTimestamp":"2026-04-05T12:00:00Z"},${filler(12_000)},{"kind":"Event","lastTimestamp":"2026-04-01T00:00:00Z"}]}`,
+    );
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-05T12:00:00Z"), source: "events" });
+  });
+
   it("falls back to the newest event in cluster/events", async () => {
     const dir = await withoutLogTimes();
     await writeFile(
