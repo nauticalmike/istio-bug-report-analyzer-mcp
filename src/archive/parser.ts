@@ -157,10 +157,41 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
   }
 }
 
-export function tryParseJson(content: string): unknown | null {
+// A log line in front of the JSON body is short; the start is only looked for in this head.
+const JSON_PREFIX_SEARCH_CHARS = 64 * 1024;
+// Each retry parses the rest of the content, which can be hundreds of MB, so retries are capped.
+const MAX_JSON_START_CANDIDATES = 3;
+
+function parseOrNull(content: string): unknown | null {
   try {
     return JSON.parse(content);
   } catch {
     return null;
   }
+}
+
+/**
+ * Parses JSON, also when istioctl wrote log lines ahead of the body (seen on istiod debug
+ * output such as push_status and syncz). Text before the JSON is dropped: first a `{` or `[`
+ * that starts a line, then the first `{` or `[` anywhere, since a log line can itself hold brackets.
+ */
+export function tryParseJson(content: string): unknown | null {
+  const whole = parseOrNull(content);
+  if (whole !== null) return whole;
+
+  const head = content.slice(0, JSON_PREFIX_SEARCH_CHARS);
+  const starts: number[] = [];
+  for (const m of head.matchAll(/^[ \t]*([{[])/gm)) starts.push(m.index + m[0].length - 1);
+  const anywhere = head.search(/[{[]/);
+  if (anywhere >= 0) starts.push(anywhere);
+
+  const tried = new Set<number>([0]);
+  for (const start of starts) {
+    if (tried.has(start)) continue;
+    if (tried.size > MAX_JSON_START_CANDIDATES) break;
+    tried.add(start);
+    const parsed = parseOrNull(content.slice(start));
+    if (parsed !== null) return parsed;
+  }
+  return null;
 }
