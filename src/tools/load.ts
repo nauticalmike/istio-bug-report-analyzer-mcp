@@ -8,6 +8,7 @@ import {
   estimateExpandedSize,
   extractionTracker,
   freeBytes as statFreeBytes,
+  startupSweepDone,
   type ExtractionTracker,
 } from "../archive/extraction.js";
 import { formatCompleteness } from "../archive/completeness.js";
@@ -20,6 +21,10 @@ import { versionSummaryLines } from "./overview.js";
 export interface LoadOptions {
   tracker: ExtractionTracker;
   freeBytes: (dir: string) => Promise<number>;
+  /** Awaited before anything is read; defaults to the server's startup sweep. */
+  ready?: Promise<unknown>;
+  /** Builds the store from a report directory; defaults to BugReportStore.fromDirectory. */
+  openStore?: (dir: string) => Promise<BugReportStore>;
 }
 
 const errorResult = (text: string) => ({ content: [{ type: "text" as const, text }], isError: true as const });
@@ -65,17 +70,21 @@ export async function loadBugReport(
   opts: LoadOptions = { tracker: extractionTracker, freeBytes: statFreeBytes },
 ) {
   let tempDir: string | undefined;
+  let held: { dir: string; drop: () => Promise<void> } | undefined;
   try {
+    // The startup sweep deletes dead servers' extractions: one of them may be what is loaded.
+    await (opts.ready ?? startupSweepDone());
     const pathStat = await stat(path);
     let archiveDir: string;
     let extractWarning: string | undefined;
 
     // A directory inside one of our extractions (say, the previous report's root) is read by
-    // the new store too, so the extraction must outlive the store it was made for.
-    let heldExtraction: string | undefined;
+    // the new store too, so the extraction must outlive the store it was made for. It is held
+    // from the lookup on, so a concurrent load that releases its old owner cannot delete it
+    // while this one is still indexing it.
     if (pathStat.isDirectory()) {
       archiveDir = path;
-      heldExtraction = await opts.tracker.containing(path);
+      held = await opts.tracker.holdContaining(path);
     } else if (path.endsWith(".tar.gz") || path.endsWith(".tgz")) {
       const extraction = await extractWithChecks(path, resolve(extract_dir ?? tmpdir()), opts);
       if ("error" in extraction) return errorResult(extraction.error);
@@ -84,7 +93,7 @@ export async function loadBugReport(
       return errorResult(`Error: path must be a directory or .tar.gz file. Got: ${path}`);
     }
 
-    const store = await BugReportStore.fromDirectory(archiveDir);
+    const store = await (opts.openStore ?? BugReportStore.fromDirectory)(archiveDir);
     const versions = store.getVersions();
     const analyzeResults = store.getAnalyzeResults();
     const proxyPods = store.getProxyPods();
@@ -94,7 +103,11 @@ export async function loadBugReport(
     const previous = getStore();
     setStore(store);
     if (tempDir) opts.tracker.attach(store, tempDir);
-    if (heldExtraction) opts.tracker.attach(store, heldExtraction);
+    if (held) {
+      opts.tracker.attach(store, held.dir);
+      await held.drop();
+      held = undefined;
+    }
     tempDir = undefined;
     if (previous && previous !== store) await opts.tracker.release(previous);
 
@@ -152,6 +165,8 @@ export async function loadBugReport(
   } catch (error) {
     // Extracted, but the report did not load: nothing reads the directory, so delete it.
     if (tempDir) await opts.tracker.remove(tempDir);
+    // Read by nothing now unless another store still holds it.
+    if (held) await held.drop();
     return errorResult(`Error loading bug report: ${error instanceof Error ? error.message : String(error)}`);
   }
 }

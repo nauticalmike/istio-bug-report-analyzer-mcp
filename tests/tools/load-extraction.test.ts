@@ -7,7 +7,7 @@ import * as tar from "tar";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { loadBugReport, type LoadOptions } from "../../src/tools/load.js";
 import { EXTRACT_DIR_PREFIX, ExtractionTracker } from "../../src/archive/extraction.js";
-import type { BugReportStore } from "../../src/archive/store.js";
+import { BugReportStore } from "../../src/archive/store.js";
 
 const textOf = (r: { content: { type: string; text?: string }[] }) => (r.content[0] as { text: string }).text;
 
@@ -94,6 +94,77 @@ describe("loadBugReport extraction lifecycle", () => {
     await createMinimalArchive(userDir);
     await load(userDir);
     expect(await extracted()).toHaveLength(0);
+  });
+
+  /** An openStore that waits for `open()` before reading, and says when it was called. */
+  function gatedOpen() {
+    let open!: () => void;
+    let called!: () => void;
+    const gate = new Promise<void>((r) => { open = r; });
+    const reached = new Promise<void>((r) => { called = r; });
+    const openStore = async (dir: string) => {
+      called();
+      await gate;
+      return BugReportStore.fromDirectory(dir);
+    };
+    return { openStore, open, reached };
+  }
+
+  it("keeps an extraction that a load in progress reads, even when its report is replaced meanwhile", async () => {
+    await load(await makeTarball("a"));
+    const [first] = await extracted();
+    const inner = join(extractParent, first, "bug-report");
+    const userDir = join(tempDir, "user-dir");
+    await createMinimalArchive(userDir);
+
+    const gated = gatedOpen();
+    const pending = load(inner, { openStore: gated.openStore });
+    await gated.reached;
+    // Another load replaces the report that held the extraction, while the first one is still reading it.
+    expect((await load(userDir)).isError).toBeUndefined();
+    expect(existsSync(join(inner, "versions"))).toBe(true);
+    gated.open();
+    const result = await pending;
+    expect(result.isError).toBeUndefined();
+    expect(store!.getVersions()?.clientVersion).toBe("1.31.2");
+
+    // Released once the report reading it is replaced.
+    await load(userDir);
+    expect(await extracted()).toHaveLength(0);
+  });
+
+  it("drops the provisional hold when the load fails, deleting an extraction nothing else holds", async () => {
+    await load(await makeTarball("a"));
+    const [first] = await extracted();
+    const inner = join(extractParent, first, "bug-report");
+    const userDir = join(tempDir, "user-dir");
+    await createMinimalArchive(userDir);
+
+    let called!: () => void;
+    const reached = new Promise<void>((r) => { called = r; });
+    let fail!: () => void;
+    const failing = new Promise<never>((_, reject) => { fail = () => reject(new Error("boom")); });
+    const pending = load(inner, { openStore: () => { called(); return failing; } });
+    await reached;
+    await load(userDir);
+    expect(await extracted()).toEqual([first]);
+    fail();
+    expect((await pending).isError).toBe(true);
+    expect(await extracted()).toHaveLength(0);
+  });
+
+  it("waits for the startup sweep before reading anything", async () => {
+    const userDir = join(tempDir, "user-dir");
+    await createMinimalArchive(userDir);
+    let done!: () => void;
+    const ready = new Promise<void>((r) => { done = r; });
+    let finished = false;
+    const pending = load(userDir, { ready }).then((r) => { finished = true; return r; });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(finished).toBe(false);
+    expect(store).toBeNull();
+    done();
+    expect((await pending).isError).toBeUndefined();
   });
 
   it("does not list the ownership marker as a report file", async () => {

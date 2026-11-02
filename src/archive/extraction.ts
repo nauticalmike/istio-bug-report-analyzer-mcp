@@ -162,6 +162,32 @@ export class ExtractionTracker {
     return true;
   }
 
+  /**
+   * The tracked directory that is `path` or contains it, held for the caller from the moment
+   * it is found: a load that reads it can then not lose it to another load that releases its
+   * last owner meanwhile. The returned `drop` gives the hold back (after attach() on success,
+   * or on failure), deleting the directory when nothing else holds it.
+   */
+  async holdContaining(path: string): Promise<{ dir: string; drop: () => Promise<void> } | undefined> {
+    const dir = await this.containing(path);
+    // Synchronously after the lookup, so no release can run in between.
+    if (!dir || !this.owned.has(dir)) return undefined;
+    this.holders.set(dir, (this.holders.get(dir) ?? 0) + 1);
+    let dropped = false;
+    const drop = async () => {
+      if (dropped) return;
+      dropped = true;
+      const left = (this.holders.get(dir) ?? 1) - 1;
+      if (left > 0) {
+        this.holders.set(dir, left);
+        return;
+      }
+      this.holders.delete(dir);
+      await this.remove(dir);
+    };
+    return { dir, drop };
+  }
+
   /** Ties a created directory to the object (a store) that reads from it. */
   attach(owner: object, dir: string): void {
     if (!this.owned.has(dir) || this.byOwner.get(owner) === dir) return;
@@ -277,6 +303,23 @@ export async function sweepStaleExtractions(
 
 /** The tracker the server uses for every archive it extracts. */
 export const extractionTracker = new ExtractionTracker();
+
+let startupSweep: Promise<unknown> = Promise.resolve();
+
+/**
+ * Starts the server's sweep of `parent` for leftover extractions. Loads await it
+ * (startupSweepDone), so the sweep never deletes a directory a load is reading.
+ */
+export function runStartupSweep(parent: string): Promise<string[]> {
+  const sweep = sweepStaleExtractions(parent).catch(() => [] as string[]);
+  startupSweep = sweep;
+  return sweep;
+}
+
+/** Settles once the startup sweep (if one was started) has finished; never rejects. */
+export function startupSweepDone(): Promise<unknown> {
+  return startupSweep;
+}
 
 const SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
 
