@@ -374,10 +374,17 @@ export class BugReportStore {
     return istiod?.debugEndpoints.get(endpoint) ?? null;
   }
 
-  getClusterResources(filter?: { kind?: string; namespace?: string; name?: string }): ParsedResource[] {
+  /**
+   * `group` matches the API group of apiVersion ("" for the core group), so a third-party
+   * CRD that reuses an Istio kind name (EnvoyFilter, Gateway, ...) is not mixed in.
+   */
+  getClusterResources(filter?: { kind?: string; namespace?: string; name?: string; group?: string }): ParsedResource[] {
     let resources = this.loadClusterResources();
     if (filter?.kind) {
       resources = resources.filter((r) => r.kind === filter.kind);
+    }
+    if (filter?.group !== undefined) {
+      resources = resources.filter((r) => apiGroup(r.apiVersion) === filter.group);
     }
     if (filter?.namespace) {
       resources = resources.filter((r) => r.metadata?.namespace === filter.namespace);
@@ -463,6 +470,12 @@ interface ClusterAccumulator {
 
 function newClusterAccumulator(): ClusterAccumulator {
   return { seen: new Set(), resources: [] };
+}
+
+/** API group of an apiVersion: "networking.istio.io/v1" -> "networking.istio.io", "v1" -> "". */
+export function apiGroup(apiVersion: string | undefined): string {
+  const slash = apiVersion?.lastIndexOf("/") ?? -1;
+  return slash > 0 ? apiVersion!.slice(0, slash) : "";
 }
 
 /** A UTF-8 byte that continues a multi-byte character (0b10xxxxxx). */

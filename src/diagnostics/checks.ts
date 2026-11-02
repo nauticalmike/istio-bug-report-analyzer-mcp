@@ -25,6 +25,9 @@ function containers(r: ParsedResource): Obj[] {
   return list(podSpec?.containers).map(obj).filter((c): c is Obj => !!c);
 }
 
+export const ISTIO_NETWORKING = "networking.istio.io";
+export const GATEWAY_API = "gateway.networking.k8s.io";
+
 function istiodDeployments(store: BugReportStore): ParsedResource[] {
   return store.getClusterResources({ kind: "Deployment" }).filter((d) => d.metadata.labels?.app === "istiod");
 }
@@ -263,7 +266,7 @@ function matchesLabels(r: ParsedResource, selector: Record<string, unknown>): bo
 }
 
 export function riskyEnvoyFilters(store: BugReportStore): Issue[] {
-  const filters = store.getClusterResources({ kind: "EnvoyFilter" });
+  const filters = store.getClusterResources({ kind: "EnvoyFilter", group: ISTIO_NETWORKING });
   if (filters.length === 0) return [];
 
   const rootNamespace = (meshConfig(store)?.rootNamespace as string | undefined) ?? "istio-system";
@@ -292,7 +295,9 @@ export function riskyEnvoyFilters(store: BugReportStore): Issue[] {
     for (const ref of list(spec.targetRefs).map(obj)) {
       const kind = ref?.kind;
       if (kind !== "Gateway" && kind !== "Service") continue;
-      const known = store.getClusterResources({ kind });
+      // An unset group is the core group for Service and Gateway API for Gateway (never Istio's Gateway).
+      const group = typeof ref?.group === "string" && ref.group !== "" ? ref.group : kind === "Gateway" ? GATEWAY_API : "";
+      const known = store.getClusterResources({ kind, group });
       if (known.length === 0) continue;
       const exists = known.some((r) => r.metadata.name === ref?.name && r.metadata.namespace === ef.metadata.namespace);
       if (!exists) issues.push({ detail: `${name}: targetRef ${kind}/${ref?.name} does not exist` });
