@@ -169,7 +169,8 @@ export type SignalSource =
     }
   | { type: "envoyfilter_risks" }
   | { type: "demo_profile" }
-  | { type: "istiod_replicas" };
+  | { type: "istiod_replicas" }
+  | { type: "sidecar_scope" };
 
 export type SignalCheck =
   | { op: "exists" }

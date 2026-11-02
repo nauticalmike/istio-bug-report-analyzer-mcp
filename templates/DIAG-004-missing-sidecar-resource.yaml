@@ -1,30 +1,40 @@
 id: DIAG-004
-name: No Sidecar Resources Defined
+name: Sidecar Proxies Without Sidecar Scoping
 category: config
 severity: warning
 appliesTo:
   - sidecar
   - interop
 description: >
-  No Sidecar resources were found in the mesh. Without Sidecar resources,
-  every proxy receives configuration for every service in the mesh.
+  Sidecar proxies in the namespaces listed under Affected are not selected by any Sidecar
+  resource, and there is no mesh-wide default Sidecar in the root namespace. Each of those
+  proxies receives configuration for every service in the mesh.
 rootCause: >
-  Sidecar resources have not been created to scope proxy configurations.
-  This is common in initial deployments but problematic at scale.
+  Sidecar resources have not been created to scope proxy configuration, or only
+  workload-scoped ones exist. This is common in initial deployments but problematic at scale.
 impact: >
   Proxies consume more memory and CPU. Config push times increase linearly
   with the number of services. In large meshes this causes OOM kills and
   slow convergence.
 signals:
+  # Coverage per sidecar namespace (sidecar_scope in src/diagnostics/checks.ts):
+  # - not evaluated when cluster/crs is missing, empty or unparsed (Sidecars live there);
+  # - skipped for meshes under 20 sidecar proxies (SIDECAR_SCOPE_MIN_SIDECARS);
+  # - ambient namespaces are left out (a Sidecar resource has no effect there, IST0167);
+  # - a selector-less Sidecar in the root namespace covers the whole mesh.
   - source:
-      type: resource
-      kind: Sidecar
-      field: "kind"
+      type: sidecar_scope
     check:
-      op: not_exists
+      op: exists
 remediation:
   - order: 1
-    description: "Create a default Sidecar resource in istio-system to limit egress scope"
+    description: >-
+      Create a default Sidecar in the root namespace (or one per namespace listed under
+      Affected) that limits egress to the namespace itself and the control plane. Before
+      applying it, add every namespace the workloads call: in particular egress-gateway
+      namespaces and waypoint namespaces (listed under Affected when the archive shows
+      them). Leaving them out sends that traffic to the passthrough or blackhole cluster
+      and breaks egress-gateway and sidecar-to-waypoint paths.
     yaml: |
       apiVersion: networking.istio.io/v1
       kind: Sidecar
@@ -36,9 +46,18 @@ remediation:
           - hosts:
               - "./*"
               - "istio-system/*"
+              # Add the egress-gateway and waypoint namespaces, and any other namespace
+              # these workloads call, e.g.:
+              # - "istio-egress/*"
+              # - "<waypoint-namespace>/*"
     effort: low
+    risk: medium
+  - order: 2
+    description: "Roll it out one namespace at a time (a namespace-level Sidecar overrides the root default) and watch for 502/503 or BlackHoleCluster / PassthroughCluster traffic in access logs and metrics"
+    effort: medium
     risk: low
 references:
   - "https://istio.io/latest/docs/reference/config/networking/sidecar/"
+  - "https://istio.io/latest/docs/ops/configuration/mesh/configuration-scoping/"
 enrichmentHints:
   docsQuery: "Sidecar resource scoping best practices"

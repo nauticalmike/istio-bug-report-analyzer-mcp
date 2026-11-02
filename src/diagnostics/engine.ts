@@ -5,13 +5,24 @@ import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } fro
 import { BugReportStore } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
-import { demoProfileEvidence, riskyEnvoyFilters, singleReplicaIstiods, type Issue, type Severity } from "./checks.js";
+import {
+  demoProfileEvidence,
+  riskyEnvoyFilters,
+  sidecarScopeGaps,
+  singleReplicaIstiods,
+  type Issue,
+  type NotEvaluated,
+  type Severity,
+} from "./checks.js";
 
 const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 
 // Sources that compute a list of issues: the signal value is the list (null when empty)
-// and each issue's detail is reported as an affected resource.
-const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportStore, source: Signal["source"]) => Issue[]>> = {
+// and each issue's detail is reported as an affected resource. A source that cannot run on
+// the archive (data missing) returns NotEvaluated: its templates are listed by
+// getNotEvaluated() instead of firing or passing silently.
+type IssueResult = Issue[] | NotEvaluated;
+const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportStore, source: Signal["source"]) => IssueResult>> = {
   version_skew: (store) => findVersionSkew(store.getEffectiveVersions()),
   version_support: (store, source) =>
     source.type === "version_support"
@@ -24,25 +35,40 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   envoyfilter_risks: (store) => riskyEnvoyFilters(store),
   demo_profile: (store) => demoProfileEvidence(store),
   istiod_replicas: (store) => singleReplicaIstiods(store),
+  sidecar_scope: (store) => sidecarScopeGaps(store),
 };
 
 /** Per-run memo of issue sources, keyed by the source definition. */
-type IssueCache = Map<string, Issue[]>;
+type IssueCache = Map<string, IssueResult>;
 
-function issuesFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): Issue[] | null {
+function resultFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): IssueResult | null {
   const compute = ISSUE_SOURCES[source.type];
   if (!compute) return null;
   const key = JSON.stringify(source);
-  let issues = cache.get(key);
-  if (!issues) {
-    issues = compute(store, source);
-    cache.set(key, issues);
+  let result = cache.get(key);
+  if (!result) {
+    result = compute(store, source);
+    cache.set(key, result);
   }
-  return issues;
+  return result;
+}
+
+/** The issues of an issue source (empty when it was not evaluated); null for other sources. */
+function issuesFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): Issue[] | null {
+  const result = resultFor(source, store, cache);
+  if (!result) return null;
+  return Array.isArray(result) ? result : [];
+}
+
+export interface NotEvaluatedTemplate {
+  templateId: string;
+  templateName: string;
+  reason: string;
 }
 
 export class DiagnosticEngine {
   private templates: DiagnosticTemplate[] = [];
+  private notEvaluated: NotEvaluatedTemplate[] = [];
 
   async loadTemplates(templateDir: string): Promise<void> {
     try {
@@ -65,13 +91,27 @@ export class DiagnosticEngine {
     this.templates.push(template);
   }
 
+  /** Templates of the last run() that were skipped or could not be evaluated, with why. */
+  getNotEvaluated(): NotEvaluatedTemplate[] {
+    return this.notEvaluated;
+  }
+
   async run(store: BugReportStore, categories?: string[], mode?: DataPlaneMode): Promise<DiagnosticFinding[]> {
     const findings: DiagnosticFinding[] = [];
     const issueCache: IssueCache = new Map();
+    this.notEvaluated = [];
 
     for (const template of this.templates) {
       if (categories && !categories.includes(template.category)) continue;
       if (template.appliesTo && mode && !template.appliesTo.includes(mode)) continue;
+
+      const reason = template.signals
+        .map((s) => resultFor(s.source, store, issueCache))
+        .find((r): r is NotEvaluated => !!r && !Array.isArray(r))?.notEvaluated;
+      if (reason) {
+        this.notEvaluated.push({ templateId: template.id, templateName: template.name, reason });
+        continue;
+      }
 
       let allMatch = true;
       for (const signal of template.signals) {

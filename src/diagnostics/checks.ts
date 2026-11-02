@@ -176,6 +176,126 @@ export function singleReplicaIstiods(store: BugReportStore): Issue[] {
   return [...groups].filter(([, n]) => n < 2).map(([key, n]) => ({ detail: `${key}: ${n} pod collected` }));
 }
 
+// --- DIAG-004: Sidecar scoping -------------------------------------------
+
+/**
+ * Below this many sidecar proxies (outside ambient namespaces) DIAG-004 is skipped: every
+ * proxy holding config for every service costs little in a small mesh, and a POC or test
+ * mesh with a handful of workloads is better off without a scoping rule that can break
+ * egress-gateway and waypoint paths.
+ */
+export const SIDECAR_SCOPE_MIN_SIDECARS = 20;
+
+/** An issue source that could not run on this archive, with the reason shown to the user. */
+export interface NotEvaluated {
+  notEvaluated: string;
+}
+
+/** The istio-proxy container's role from its args: "proxy sidecar", "proxy router", "proxy waypoint". */
+function proxyRole(p: ParsedResource): string | null {
+  const proxy = [...list(p.spec?.containers), ...list(p.spec?.initContainers)].map(obj).find((c) => c?.name === "istio-proxy");
+  if (!proxy) return null;
+  const args = list(proxy.args).filter((a): a is string => typeof a === "string");
+  return args.find((a) => a === "sidecar" || a === "router" || a === "waypoint") ?? "sidecar";
+}
+
+/**
+ * Sidecar proxies per namespace: from the pod dump (with the pods, for selector matching),
+ * else counted from the collected proxy directories.
+ */
+function sidecarsByNamespace(store: BugReportStore): Map<string, { count: number; pods?: ParsedResource[] }> {
+  const byNs = new Map<string, { count: number; pods?: ParsedResource[] }>();
+  const pods = store.getClusterResources({ kind: "Pod", group: "" });
+  if (pods.length > 0) {
+    for (const p of pods) {
+      const phase = obj(p.status)?.phase;
+      if (phase === "Succeeded" || phase === "Failed" || proxyRole(p) !== "sidecar") continue;
+      const ns = p.metadata.namespace ?? "default";
+      const entry = byNs.get(ns) ?? { count: 0, pods: [] };
+      entry.count++;
+      entry.pods!.push(p);
+      byNs.set(ns, entry);
+    }
+    return byNs;
+  }
+  for (const proxy of store.getProxyPods()) {
+    if (proxy.proxyType !== "sidecar") continue;
+    const entry = byNs.get(proxy.namespace) ?? { count: 0 };
+    entry.count++;
+    byNs.set(proxy.namespace, entry);
+  }
+  return byNs;
+}
+
+/** Namespaces of egress gateways and waypoints, which a too-narrow egress.hosts cuts sidecars off from. */
+function egressTargetNamespaces(store: BugReportStore): string[] {
+  const found = new Map<string, string>();
+  for (const p of store.getClusterResources({ kind: "Pod", group: "" })) {
+    const ns = p.metadata.namespace ?? "default";
+    const labels = p.metadata.labels ?? {};
+    if (labels.istio === "egressgateway" || /(^|-)egressgateway(-|$)/.test(p.metadata.name)) found.set(ns, "egress gateway");
+    else if (proxyRole(p) === "waypoint" || labels["gateway.istio.io/managed"] === "istio.io-mesh-controller") found.set(ns, "waypoint");
+  }
+  for (const gw of store.getClusterResources({ kind: "Gateway", group: GATEWAY_API })) {
+    if (gw.spec?.gatewayClassName === "istio-waypoint") found.set(gw.metadata.namespace ?? "default", "waypoint");
+  }
+  for (const proxy of store.getProxyPods()) {
+    if (proxy.proxyType === "waypoint" && !found.has(proxy.namespace)) found.set(proxy.namespace, "waypoint");
+  }
+  return [...found].sort(([a], [b]) => a.localeCompare(b)).map(([ns, what]) => `${ns}/* (${what})`);
+}
+
+/**
+ * Sidecar namespaces whose proxies no Sidecar resource scopes, so each one receives config
+ * for every service in the mesh. Not evaluated without cluster/crs (Sidecars live there);
+ * skipped for meshes under SIDECAR_SCOPE_MIN_SIDECARS sidecars. Ambient namespaces are
+ * left out: a Sidecar resource does nothing for ztunnel-captured pods (IST0167).
+ */
+export function sidecarScopeGaps(store: BugReportStore): Issue[] | NotEvaluated {
+  const crs = store.getClusterDumpItems("cluster/crs");
+  if (crs === "missing") return { notEvaluated: "not evaluated: cluster/crs missing from the archive, so Sidecar resources cannot be seen" };
+  if (crs === "unparsed") return { notEvaluated: "not evaluated: cluster/crs could not be parsed (see the cluster warnings)" };
+  if (crs === 0) return { notEvaluated: "not evaluated: cluster/crs is empty, so Sidecar resources cannot be seen" };
+
+  const rootNamespace = (meshConfig(store)?.rootNamespace as string | undefined) ?? "istio-system";
+  const scopes = store.getClusterResources({ kind: "Sidecar", group: ISTIO_NETWORKING });
+  const selectorOf = (s: ParsedResource) => {
+    const labels = obj(obj(s.spec?.workloadSelector)?.labels);
+    return labels && Object.keys(labels).length > 0 ? labels : null;
+  };
+  // A selector-less Sidecar in the root namespace is the mesh-wide default.
+  if (scopes.some((s) => s.metadata.namespace === rootNamespace && !selectorOf(s))) return [];
+
+  const ambient = new Set(store.detectDataPlaneMode().ambientNamespaces);
+  const byNs = [...sidecarsByNamespace(store)].filter(([ns]) => !ambient.has(ns)).sort(([a], [b]) => a.localeCompare(b));
+  const total = byNs.reduce((sum, [, s]) => sum + s.count, 0);
+  if (total < SIDECAR_SCOPE_MIN_SIDECARS) {
+    return { notEvaluated: `skipped: ${total} sidecar prox${total === 1 ? "y" : "ies"}, below the ${SIDECAR_SCOPE_MIN_SIDECARS} where Sidecar scoping pays off` };
+  }
+
+  const issues: Issue[] = [];
+  for (const [ns, { count, pods }] of byNs) {
+    const own = scopes.filter((s) => s.metadata.namespace === ns);
+    if (own.some((s) => !selectorOf(s))) continue;
+    const selectors = own.map(selectorOf).filter((s): s is Obj => !!s);
+    if (selectors.length === 0) {
+      issues.push({ detail: `namespace ${ns}: ${count} sidecar${count === 1 ? "" : "s"}, no Sidecar resource selects them` });
+      continue;
+    }
+    // Workload-scoped Sidecars only: count the pods none of them selects (needs the pod dump).
+    if (!pods) continue;
+    const unselected = pods.filter((p) => !selectors.some((sel) => matchesLabels(p, sel))).length;
+    if (unselected > 0) issues.push({ detail: `namespace ${ns}: ${unselected} of ${count} sidecars not selected by any Sidecar resource` });
+  }
+  if (issues.length === 0) return [];
+
+  const targets = egressTargetNamespaces(store).filter((t) => !t.startsWith(`${rootNamespace}/`) && !t.startsWith("istio-system/"));
+  if (targets.length > 0) {
+    issues.push({ detail: `remediation: besides ./* and ${rootNamespace}/*, keep these namespaces in egress.hosts: ${targets.join(", ")}` });
+  }
+  return issues;
+}
+
 // --- DIAG-005: risky EnvoyFilters ----------------------------------------
 
 /**

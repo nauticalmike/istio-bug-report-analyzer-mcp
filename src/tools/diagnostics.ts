@@ -1,6 +1,6 @@
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DiagnosticEngine } from "../diagnostics/engine.js";
+import { DiagnosticEngine, type NotEvaluatedTemplate } from "../diagnostics/engine.js";
 import type { BugReportStore } from "../archive/store.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -16,12 +16,13 @@ export async function runDiagnostics(
   const categories = params.categories?.split(",").map((c) => c.trim());
   const modeInfo = store.detectDataPlaneMode();
   const findings = await engine.run(store, categories, modeInfo.mode);
+  const skipped = notEvaluatedLines(engine.getNotEvaluated());
 
   if (findings.length === 0) {
     return {
       content: [{
         type: "text" as const,
-        text: "Diagnostic scan complete. No issues detected by built-in templates.",
+        text: ["Diagnostic scan complete. No issues detected by built-in templates.", ...skipped].join("\n"),
       }],
     };
   }
@@ -43,6 +44,13 @@ export async function runDiagnostics(
       "",
     );
   }
+  lines.push(...skipped);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+}
+
+/** Templates that did not run on this archive, so "no finding" is not read as "no problem". */
+function notEvaluatedLines(entries: NotEvaluatedTemplate[]): string[] {
+  if (entries.length === 0) return [];
+  return ["", "Not evaluated or skipped:", ...entries.map((e) => `  - ${e.templateId} (${e.templateName}): ${e.reason}`)];
 }

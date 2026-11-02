@@ -127,6 +127,7 @@ export class BugReportStore {
   private cachedModeInfo: DataPlaneModeInfo | null = null;
   private effectiveVersions: VersionInfo | null | undefined = undefined;
   private captureTime: Date | null | undefined = undefined;
+  private dumpItemCounts = new Map<string, number>();
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
@@ -220,7 +221,9 @@ export class BugReportStore {
       if (skipped.has(file)) continue;
       const info: ScanInfo = {};
       try {
-        addClusterDump(acc, parseClusterDumpFile(this.pathIndex.get(file), info));
+        const items = parseClusterDumpFile(this.pathIndex.get(file), info);
+        this.dumpItemCounts.set(file, items.length);
+        addClusterDump(acc, items);
       } catch (e) {
         issues.push(`${file} (${formatMB(sizes.get(file) ?? 0)}) could not be parsed: ${e instanceof Error ? e.message : String(e)}`);
         continue;
@@ -235,6 +238,17 @@ export class BugReportStore {
   /** Awaited by the server before tools that need cluster data. */
   ensureClusterResources(): Promise<ParsedResource[]> {
     return Promise.resolve(this.loadClusterResources());
+  }
+
+  /**
+   * What one cluster dump contributed: "missing" when the archive has no such file,
+   * "unparsed" when the parse skipped it (heap guard or parse error), else its item count
+   * (before deduplication against the other dumps). Runs the cluster parse if needed.
+   */
+  getClusterDumpItems(file: string): number | "missing" | "unparsed" {
+    if (!this.pathIndex.has(file)) return "missing";
+    this.loadClusterResources();
+    return this.dumpItemCounts.get(file) ?? "unparsed";
   }
 
   /** Dumps skipped or only partly parsed by the cluster parse (empty before it runs). */

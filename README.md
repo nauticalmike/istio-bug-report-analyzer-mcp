@@ -86,6 +86,23 @@ The `estimate_resource_savings` tool analyzes the mesh's infrastructure footprin
 
 The tool extracts actual resource requests from Pod specs when available, falling back to Istio defaults. It also flags optimization opportunities like over-provisioned sidecars and high-density namespaces.
 
+## Diagnostics
+
+`run_diagnostics` runs the templates in `templates/`. A check that needs data the archive does not have is listed under "Not evaluated or skipped" with the reason, instead of firing or passing silently.
+
+| ID | Checks |
+|----|--------|
+| `DIAG-001` | Proxies, ztunnel and istio-cni more than one minor behind, or ahead of, every control plane revision (patch and build-suffix differences are ignored) |
+| `DIAG-002` | Demo profile (istiod at the demo requests plus another demo setting) |
+| `DIAG-003` | istiod Deployments with fewer than 2 replicas (HPA floor or `replicas`) |
+| `DIAG-004` | Sidecar namespaces whose proxies no Sidecar resource scopes (see below) |
+| `DIAG-005` | Stale or orphaned EnvoyFilters |
+| `DIAG-006` | Control plane or istioctl outside its support window on the capture date (see [Supported Istio Versions](#supported-istio-versions)) |
+
+**DIAG-004** reports coverage per sidecar namespace: a namespace with no Sidecar resource, or with only workload-scoped ones that leave some sidecars unselected. A selector-less Sidecar in the root namespace covers the whole mesh. It is not evaluated when `cluster/crs` is missing, empty or unparsed (Sidecar resources live there), skips ambient namespaces (a Sidecar resource has no effect on ztunnel-captured pods), and is skipped for meshes under 20 sidecar proxies (`SIDECAR_SCOPE_MIN_SIDECARS`), where unscoped config costs little. When it fires it also names the egress-gateway and waypoint namespaces that a scoped `egress.hosts` must keep, since leaving them out breaks those paths.
+
+Version checks fall back to pod image tags (`pilot`, `proxyv2`, `ztunnel`, `install-cni`) when the `versions` file is missing or holds an error such as "unable to retrieve Pods"; overview, `get_versions` and the findings say when they did.
+
 ## Large Bug Reports
 
 Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one List item at a time, so dumps larger than Node's ~512 MiB string limit load too. A parsed dump takes roughly 1.5–2.5× its file size in heap; on Node's default heap (~4 GB) up to about 1.2 GB of dumps in total load. If a dump would not fit, it is skipped and every tool that uses cluster data says so, with the `--max-old-space-size` value to restart with. The same check runs on file sizes alone when the archive is loaded, so `load_bug_report` and `get_overview` give the warning before any cluster tool runs, and note dumps over the string limit that will be parsed item by item. For example:

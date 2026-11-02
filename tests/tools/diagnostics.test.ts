@@ -31,4 +31,15 @@ describe("runDiagnostics", () => {
     const result = await runDiagnostics(store, { categories: "version" });
     expect(result.content[0].type).toBe("text");
   });
+
+  it("lists checks that could not be evaluated instead of reporting them as clean", async () => {
+    const archiveDir = join(tempDir, "bug-report-no-crs");
+    await createMinimalArchive(archiveDir);
+    await rm(join(archiveDir, "cluster", "crs"));
+    const noCrs = await BugReportStore.fromDirectory(archiveDir);
+    const text = ((await runDiagnostics(noCrs, { categories: "config" })).content[0] as { text: string }).text;
+    expect(text).not.toContain("DIAG-004: ");
+    expect(text).toContain("Not evaluated or skipped:");
+    expect(text).toContain("DIAG-004 (Sidecar Proxies Without Sidecar Scoping): not evaluated: cluster/crs missing from the archive");
+  });
 });
