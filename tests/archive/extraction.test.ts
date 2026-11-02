@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { hostname, tmpdir } from "node:os";
@@ -146,6 +146,39 @@ describe("ExtractionTracker", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
+  it("keeps the marker of a dir whose delete stopped partway, so the startup sweep can finish it", async () => {
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(parent);
+    await mkdir(join(dir, "bug-report"));
+    await writeFile(join(dir, "bug-report", "versions"), "x");
+    const blocked = join(dir, "zz-blocked");
+    await mkdir(blocked);
+    await writeFile(join(blocked, "f"), "x");
+    await chmod(blocked, 0o500);
+    try {
+      await expect(tracker.remove(dir)).rejects.toThrow();
+      expect(existsSync(join(dir, EXTRACT_MARKER_FILE))).toBe(true);
+    } finally {
+      await chmod(blocked, 0o700);
+    }
+    expect(await tracker.remove(dir)).toBe(true);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("reports a dir it is removing, so a load can refuse it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const tracker = new ExtractionTracker({ removeDir: async (d) => { await gate; await rm(d, { recursive: true, force: true }); } });
+    const dir = await tracker.create(parent);
+    await mkdir(join(dir, "bug-report"));
+    const removing = tracker.remove(dir);
+    expect(await tracker.removingContaining(join(dir, "bug-report"))).toBe(dir);
+    expect(await tracker.removingContaining(parent)).toBeUndefined();
+    release();
+    await removing;
+    expect(await tracker.removingContaining(join(dir, "bug-report"))).toBeUndefined();
+  });
+
   it("removeAllSync still deletes a dir whose async remove is under way", async () => {
     const tracker = new ExtractionTracker();
     const dir = await tracker.create(parent);
@@ -267,6 +300,33 @@ describe("sweepStaleExtractions", () => {
     expect(await sweepStaleExtractions(parent, isAlive)).toEqual([]);
     expect(existsSync(leftover)).toBe(false);
     expect(existsSync(unmarked)).toBe(true);
+  });
+
+  it("deletes the marker last, so an interrupted background delete is finished by a later sweep", async () => {
+    // A child that cannot be deleted stops the delete partway, as a crash or SIGKILL would.
+    const leftover = await dirWith(`.deleting-${EXTRACT_DIR_PREFIX}interrupted`, `${process.pid}\n`);
+    for (let i = 0; i < 50; i++) await writeFile(join(leftover, "bug-report", `f${i}`), "x");
+    const blocked = join(leftover, "zz-blocked");
+    await mkdir(blocked);
+    await writeFile(join(blocked, "f"), "x");
+    await chmod(blocked, 0o500);
+    try {
+      await sweepStaleExtractions(parent, isAlive);
+      expect(existsSync(leftover)).toBe(true);
+      expect(existsSync(join(leftover, EXTRACT_MARKER_FILE))).toBe(true);
+    } finally {
+      await chmod(blocked, 0o700);
+    }
+    await sweepStaleExtractions(parent, isAlive);
+    expect(existsSync(leftover)).toBe(false);
+  });
+
+  it("finishes a delete that stopped after removing some children but not the marker", async () => {
+    const leftover = await dirWith(`.deleting-${EXTRACT_DIR_PREFIX}partial`, `${process.pid}\n`);
+    // What an interrupted marker-last delete leaves: the report gone, the marker kept.
+    await rm(join(leftover, "bug-report"), { recursive: true });
+    await sweepStaleExtractions(parent, isAlive);
+    expect(existsSync(leftover)).toBe(false);
   });
 
   it("returns nothing for a missing parent", async () => {

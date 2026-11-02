@@ -8,6 +8,7 @@ import {
   estimateExpandedSize,
   extractionTracker,
   freeBytes as statFreeBytes,
+  insideSweptDir,
   startupSweepDone,
   type ExtractionTracker,
 } from "../archive/extraction.js";
@@ -112,6 +113,10 @@ export async function loadBugReport(
     if (pathStat.isDirectory()) {
       archiveDir = path;
       held = await opts.tracker.holdContaining(path);
+      // Not held because its delete is under way (or the startup sweep's): it is vanishing.
+      if (!held && (insideSweptDir(path) || (await opts.tracker.removingContaining(path)))) {
+        return errorResult(`Error: ${path} is inside an extraction that is being deleted; load the archive again.`);
+      }
     } else if (path.endsWith(".tar.gz") || path.endsWith(".tgz")) {
       const extraction = await extractWithChecks(path, resolve(extract_dir ?? tmpdir()), opts);
       if ("error" in extraction) return errorResult(extraction.error);

@@ -141,8 +141,10 @@ the npm package (`istio-bug-report-analyzer-mcp`).
   namespace). Directories without the marker, or written by another host or pid namespace,
   are never touched; on macOS a host-name change leaves older leftovers unswept, never
   wrongly deleted. Loads wait only for that sweep's classification: doomed dirs are renamed
-  out of the prefix and deleted in the background. A dir being deleted is never handed to
-  a load. Loading a directory inside an extraction keeps that extraction until
+  out of the prefix and deleted in the background, marker last, so a delete cut short is
+  finished by the next sweep. Loading a directory inside an extraction that is being deleted
+  fails with an error saying it is inside an extraction that is being deleted and to load
+  the archive again, instead of reading a vanishing tree. Loading a directory inside an extraction keeps that extraction until
   the report reading it is replaced, also when another load replaces the old report while
   the first one is still reading it.
 - Cluster dumps over 512 MiB load item by item; a dump that will not fit in the heap is

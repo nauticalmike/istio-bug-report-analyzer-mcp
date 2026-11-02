@@ -153,6 +153,31 @@ describe("loadBugReport extraction lifecycle", () => {
     expect(await extracted()).toHaveLength(0);
   });
 
+  it("refuses a directory inside an extraction that is being deleted, instead of reading a vanishing tree", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    tracker = new ExtractionTracker({ removeDir: async (d) => { await gate; await rm(d, { recursive: true, force: true }); } });
+    const dir = await tracker.create(extractParent);
+    await createMinimalArchive(join(dir, "bug-report"));
+    const removing = tracker.remove(dir);
+    let opened = false;
+    const result = await load(join(dir, "bug-report"), { openStore: async (d) => { opened = true; return BugReportStore.fromDirectory(d); } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/inside an extraction that is being deleted; load the archive again/);
+    expect(opened).toBe(false);
+    expect(store).toBeNull();
+    release();
+    expect(await removing).toBe(true);
+  });
+
+  it("refuses a directory inside a .deleting- dir the startup sweep is removing", async () => {
+    const doomed = join(extractParent, `.deleting-${EXTRACT_DIR_PREFIX}old`);
+    await createMinimalArchive(join(doomed, "bug-report"));
+    const result = await load(join(doomed, "bug-report"));
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toMatch(/inside an extraction that is being deleted; load the archive again/);
+  });
+
   it("waits for the startup sweep before reading anything", async () => {
     const userDir = join(tempDir, "user-dir");
     await createMinimalArchive(userDir);

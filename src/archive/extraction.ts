@@ -1,5 +1,5 @@
 // Only node: imports, so the exit-cleanup path can be exercised in a child process from the .ts source.
-import { readFileSync, readlinkSync, rmSync } from "node:fs";
+import { readdirSync, readFileSync, readlinkSync, rmSync } from "node:fs";
 import { hostname } from "node:os";
 import { lstat, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
@@ -112,6 +112,45 @@ export function checkFreeSpace(est: SizeEstimate, free: number, dir: string, arc
 type ExitTarget = Pick<NodeJS.EventEmitter, "on"> & { exit: (code?: number) => void };
 
 /**
+ * Deletes an extraction dir with its marker last: every other child first, then the marker,
+ * then the (empty) dir. A delete cut short (crash, SIGKILL, a child that cannot be removed)
+ * thus leaves the marker in place, and the next startup sweep, which only touches marked dirs,
+ * finishes it. A plain recursive rm may take the marker first and leak an unmarked dir forever.
+ * Rejects (leaving the marker) when a child cannot be removed.
+ */
+export async function removeMarkedDir(dir: string): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+  for (const name of names) if (name !== EXTRACT_MARKER_FILE) await rm(join(dir, name), { recursive: true, force: true });
+  await rm(join(dir, EXTRACT_MARKER_FILE), { force: true });
+  await rm(dir, { recursive: true, force: true });
+}
+
+/** removeMarkedDir, synchronous (for the process exit event). */
+function removeMarkedDirSync(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw e;
+  }
+  for (const name of names) if (name !== EXTRACT_MARKER_FILE) rmSync(join(dir, name), { recursive: true, force: true });
+  rmSync(join(dir, EXTRACT_MARKER_FILE), { force: true });
+  rmSync(dir, { recursive: true, force: true });
+}
+
+/** A path inside a dir the startup sweep renamed for deletion (`.deleting-bug-report-extract-*`). */
+export function insideSweptDir(path: string): boolean {
+  return resolve(path).split(sep).some((part) => part.startsWith(DELETING_PREFIX + EXTRACT_DIR_PREFIX));
+}
+
+/**
  * Directories this process extracted archives into. Only directories created through
  * create() are ever deleted, so a directory the user loaded is never touched. A directory
  * is deleted on release only once no attached owner (store) reads from it any more.
@@ -123,6 +162,12 @@ export class ExtractionTracker {
   private readonly holders = new Map<string, number>();
   /** Directories whose rm is under way: still owned (removeAllSync covers them), never handed out. */
   private readonly removing = new Set<string>();
+  private readonly removeDir: (dir: string) => Promise<void>;
+
+  /** `removeDir` replaces the marker-last delete (tests). */
+  constructor(opts: { removeDir?: (dir: string) => Promise<void> } = {}) {
+    this.removeDir = opts.removeDir ?? removeMarkedDir;
+  }
 
   get size(): number {
     return this.owned.size;
@@ -147,11 +192,20 @@ export class ExtractionTracker {
 
   /** The tracked directory that is `path` or contains it (symlinks resolved), if any. */
   async containing(path: string): Promise<string | undefined> {
+    return this.find(path, false);
+  }
+
+  /** The tracked directory being deleted that is `path` or contains it, if any: a load refuses it. */
+  async removingContaining(path: string): Promise<string | undefined> {
+    return this.find(path, true);
+  }
+
+  private async find(path: string, removing: boolean): Promise<string | undefined> {
     const candidates = new Set([resolve(path)]);
     const real = await realpath(path).catch(() => null);
     if (real) candidates.add(real);
     for (const dir of this.owned) {
-      if (this.removing.has(dir)) continue;
+      if (this.removing.has(dir) !== removing) continue;
       const dirs = new Set([dir]);
       const realDir = await realpath(dir).catch(() => null);
       if (realDir) dirs.add(realDir);
@@ -166,7 +220,7 @@ export class ExtractionTracker {
     // Marked before the first await: a lookup meanwhile must not hold a dir being deleted.
     this.removing.add(dir);
     try {
-      await rm(dir, { recursive: true, force: true });
+      await this.removeDir(dir);
       this.owned.delete(dir);
       return true;
     } finally {
@@ -225,7 +279,7 @@ export class ExtractionTracker {
   removeAllSync(): void {
     for (const dir of this.owned) {
       try {
-        rmSync(dir, { recursive: true, force: true });
+        removeMarkedDirSync(dir);
         this.owned.delete(dir);
         this.holders.delete(dir);
       } catch {
@@ -358,7 +412,7 @@ export async function sweepStaleExtractionsInBackground(
     }
   }
   const deleted = (async () => {
-    for (const dir of toDelete) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    for (const dir of toDelete) await removeMarkedDir(dir).catch(() => undefined);
   })();
   return { doomed, deleted };
 }
