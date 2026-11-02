@@ -1,7 +1,19 @@
 import { readFile } from "node:fs/promises";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { getHeapStatistics } from "node:v8";
-import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
+import { readArchiveDirectory, type ArchiveIndex, type FileEntry } from "./extractor.js";
+import {
+  POD_DUMP_FILES,
+  computeCompleteness,
+  findStaleProxyDirs,
+  scanPodNames,
+  type Completeness,
+  type CompletenessSignal,
+  type CompletenessSignalId,
+  type PodNames,
+  type PodNameScan,
+  type StaleProxyDirs,
+} from "./completeness.js";
 import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
@@ -131,11 +143,15 @@ export class BugReportStore {
   private effectiveVersions: VersionInfo | null | undefined = undefined;
   private captureTime: Date | null | undefined = undefined;
   private dumpItemCounts = new Map<string, number>();
+  private fileEntries = new Map<string, FileEntry>();
+  private scannedPodNames: PodNameScan | null = null;
+  private cachedCompleteness: { parsed: boolean; value: Completeness } | null = null;
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
     for (const file of index.files) {
       this.pathIndex.set(file.relativePath, file.absolutePath);
+      this.fileEntries.set(file.relativePath, file);
     }
   }
 
@@ -476,7 +492,62 @@ export class BugReportStore {
 
   /** Size in bytes from the archive index, or null when the file is not in the archive. */
   getFileSize(relativePath: string): number | null {
-    return this.index.files.find((f) => f.relativePath === relativePath)?.size ?? null;
+    return this.fileEntries.get(relativePath)?.size ?? null;
+  }
+
+  /** Modification time (ms) from the archive index, or null when the file is not in the archive. */
+  getFileMtime(relativePath: string): number | null {
+    return this.fileEntries.get(relativePath)?.mtimeMs ?? null;
+  }
+
+  /**
+   * Live pods to compare proxy dirs against: the parsed Pods once the cluster dump is
+   * parsed, else a `name:` scan of the pod dumps (no YAML parse, so it is cheap at load).
+   */
+  private podNames(): PodNames {
+    const dumps = POD_DUMP_FILES.filter((f) => this.pathIndex.has(f));
+    if (this.clusterResources) {
+      const pods = this.clusterResources.filter((r) => r.kind === "Pod");
+      const keys = new Set(pods.map((p) => `${p.metadata?.namespace ?? ""}/${p.metadata?.name ?? ""}`));
+      return {
+        available: pods.length > 0,
+        has: (ns, pod) => keys.has(`${ns}/${pod}`),
+        daemonPods: new Set(pods.map((p) => p.metadata?.name ?? "")),
+      };
+    }
+    if (!this.scannedPodNames) {
+      const candidates = new Set(this.getProxyPods().map((p) => p.podName));
+      this.scannedPodNames = scanPodNames(dumps.map((f) => this.pathIndex.get(f)!), candidates);
+    }
+    const { found, daemonPods, sawPod } = this.scannedPodNames;
+    return {
+      available: sawPod,
+      has: (_ns, pod) => found.has(pod),
+      daemonPods,
+    };
+  }
+
+  /**
+   * The data-completeness verdict (see completeness.ts). Computed from the file index and
+   * bounded reads; recomputed once after the cluster dump is parsed, which makes the
+   * stale-dir check exact.
+   */
+  getCompleteness(): Completeness {
+    const parsed = this.clusterResources !== null;
+    if (this.cachedCompleteness?.parsed !== parsed) {
+      this.cachedCompleteness = { parsed, value: computeCompleteness(this, this.podNames()) };
+    }
+    return this.cachedCompleteness.value;
+  }
+
+  /** One completeness signal by id, e.g. to ask whether cluster/crs was collected. */
+  getCompletenessSignal(id: CompletenessSignalId): CompletenessSignal {
+    return this.getCompleteness().signals.find((s) => s.id === id)!;
+  }
+
+  /** Proxy dirs whose pod is not in the cluster dump (pods gone by the time it was taken). */
+  getStaleProxyDirs(): StaleProxyDirs {
+    return findStaleProxyDirs(this, this.podNames());
   }
 
   getAllFiles(): string[] {

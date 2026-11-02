@@ -12,7 +12,10 @@ try {
     const { StdioServerTransport } = await import("@modelcontextprotocol/sdk/server/stdio.js");
     const { createServer } = await import("./server.js");
     const { loadConfig } = await import("./config.js");
+    const { extractionTracker, installExitCleanup } = await import("./archive/extraction.js");
 
+    // Archives are extracted to temp directories; delete them on exit and on SIGINT/SIGTERM/SIGHUP.
+    installExitCleanup(extractionTracker);
     const config = loadConfig();
     const { server } = createServer(config);
     const transport = new StdioServerTransport();

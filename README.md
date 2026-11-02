@@ -38,15 +38,15 @@ Then restart Claude Code to pick up the new skill.
 | Tool | Description |
 |------|-------------|
 | `collect_bug_report` | Run `istioctl bug-report` against a cluster and load results |
-| `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
-| `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop), collection issues and cluster dump size warnings |
+| `load_bug_report` | Load an existing archive or directory; checks free space before extracting (`extract_dir` picks where), gives the data-completeness verdict, reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
+| `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop), data-completeness verdict, proxy dirs with no live pod, collection issues and cluster dump size warnings |
 | `get_versions` | Version matrix with minor-level skew detection (control plane, proxies, ztunnel, istio-cni), falling back to pod image tags when the `versions` file is unusable; collapses repeated MeshInfo and warns when istioctl is older than the control plane |
 | `get_analyze_results` | `istioctl analyze` results (IST codes), with a count per code; paged with `limit`/`offset` |
 | `get_cluster_resources` | Query K8s resources by kind/namespace/name, including cluster-scoped objects; paged with `limit`/`offset` (`full: true` returns the objects as JSON) |
 | `get_proxy_config` | Envoy config for sidecars, gateways and waypoints; config dump for ztunnel; paged by character `offset` |
 | `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering; most recent lines by default, `offset` pages from the oldest |
 | `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected; paged by character `offset` |
-| `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive; lists checks that could not be evaluated (see [Diagnostics](#diagnostics)) |
+| `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive; the data-completeness verdict comes first, and checks that could not be evaluated are listed (see [Diagnostics](#diagnostics)) |
 | `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern; paged with `limit`/`offset` |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
 | `list_files` | List all files in the archive; paged with `offset` |
@@ -61,6 +61,24 @@ Showing bytes 1-97984 of 412000000. Pass offset=97984 for more.
 ```
 
 Call the tool again with that `offset` to get the next page. `get_raw_file` reads only the requested byte range, so files over Node's ~512 MiB string limit (for example `cluster/crs`) can be paged too; ranges end on a line boundary. `get_cluster_resources`, `find_errors`, `get_analyze_results` and `list_files` page over items, `get_proxy_config` and `get_istiod_debug` over characters, and `get_logs` over lines. Single log lines are cut at 2,000 characters (500 in `find_errors` samples).
+
+### Data completeness
+
+A bug report can be missing data without saying so: a section that failed to collect looks the same as a cluster with nothing in it. `load_bug_report`, `get_overview` and the top of `run_diagnostics` therefore give a verdict, `complete` only when every check below passes:
+
+| Check | Flags |
+|-------|-------|
+| `versions` | `versions` missing, no control plane version, or istioctl could not retrieve them |
+| `k8s-resources` | `cluster/k8s-resources` missing or empty |
+| `crs` | `cluster/crs` missing, or empty while `istioctl analyze` lists Istio resources |
+| `istiod-debug` | no istiod pods or debug endpoints, or debug output only from istiod pods that serve no proxies |
+| `proxy-config-dump` | proxy dirs without a `config_dump` |
+| `ztunnel-cni-logs` | ztunnel or CNI pods (dirs, or pods in the cluster dump) without logs |
+| `bug-report-log` | auth (Unauthorized/Forbidden), 404 or timeout errors in `bug-report.log` (first 64 MiB scanned) |
+| `istioctl-client` | istioctl older than the control plane |
+| `stale-proxy-dirs` | proxy dirs whose pod is not in the cluster dump (pods replaced during a long collection); the collection span from file times is shown when it is long |
+
+A check that needs data the archive does not have is reported as `not evaluated`, which also keeps the verdict from saying `complete`. `get_overview` also notes proxy dirs with no live pod next to the proxy count. The checks read only the file index and small files, plus a streaming scan of the pod dumps for pod names, so they run at load.
 
 ## Usage with Claude Code
 
@@ -110,6 +128,12 @@ Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one
 ```json
 "env": { "NODE_OPTIONS": "--max-old-space-size=8192" }
 ```
+
+### Disk space for `.tar.gz` archives
+
+Bug-report archives are mostly text and often expand to many times their compressed size. The worst case assumed is 30×. `load_bug_report` extracts a `.tar.gz` into a new `bug-report-extract-*` directory under the system temp directory, or under `extract_dir` when given (an existing directory, for example on a larger volume). Before extracting it compares the free space there with the expanded size read from the gzip trailer, and refuses with a message if it does not fit. Above 4 GiB expanded that size cannot be read exactly, so the load warns when free space is below the worst case and goes ahead. A disk that fills up during extraction fails the load and the partial extraction is deleted.
+
+The extracted directory is deleted when another report is loaded and when the server exits (including on SIGINT, SIGTERM and SIGHUP). Only directories the server created are deleted: a directory you load yourself is never touched. A server killed with SIGKILL cannot clean up; remove leftover `bug-report-extract-*` directories by hand.
 
 ## Supported Istio Versions
 

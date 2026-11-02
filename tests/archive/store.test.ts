@@ -136,6 +136,31 @@ describe("BugReportStore istiod debug endpoint iteration", () => {
   });
 });
 
+describe("BugReportStore istiod debug output with a log-line prefix", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "store-debug-prefix-test-"));
+    const archiveDir = join(tempDir, "bug-report");
+    await createMinimalArchive(archiveDir);
+    const debugDir = join(archiveDir, "istio", "istio-system", "istiod-abc", "debug");
+    const prefix = "2026-03-18T10:00:00.000000Z\twarn\tport-forward: falling back\n";
+    await writeFile(join(debugDir, "push_status"), `${prefix}${JSON.stringify({ totalPushes: 7 })}\n`);
+    await writeFile(join(debugDir, "syncz"), `${prefix}${JSON.stringify([{ proxy: "p.default", sync_status: "SYNCED" }])}`);
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("parses push_status and syncz instead of keeping the raw string", () => {
+    expect(store.getIstiodDebug("istio-system", "istiod-abc", "push_status")).toEqual({ totalPushes: 7 });
+    expect(store.getIstiodDebug("istio-system", "istiod-abc", "syncz")).toEqual([{ proxy: "p.default", sync_status: "SYNCED" }]);
+  });
+});
+
 describe("BugReportStore proxy config_dump variants", () => {
   let tempDir: string;
   let store: BugReportStore;

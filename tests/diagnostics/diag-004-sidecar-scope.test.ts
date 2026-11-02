@@ -49,7 +49,8 @@ describe("DIAG-004 Sidecar scoping coverage", () => {
   it("skips meshes below the size threshold", async () => {
     const { f, skipped } = await run(sidecars("shop", 12), crs(virtualService));
     expect(f).toBeUndefined();
-    expect(skipped?.reason).toBe("skipped: 12 sidecar proxies, below the 20 where Sidecar scoping pays off");
+    // The base fixture contributes its own sidecar pod, so the count is 12 plus that one.
+    expect(skipped?.reason).toBe("skipped: 13 sidecar proxies, below the 20 where Sidecar scoping pays off");
   });
 
   it("reports each sidecar namespace without a Sidecar resource", async () => {

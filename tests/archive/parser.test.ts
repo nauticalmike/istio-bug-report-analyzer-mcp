@@ -149,4 +149,19 @@ describe("tryParseJson", () => {
   it("returns null for invalid JSON", () => {
     expect(tryParseJson("not json")).toBeNull();
   });
+
+  // istioctl can write a log line ahead of the endpoint body when it fetches debug output.
+  it("parses a JSON object preceded by a log line (push_status)", () => {
+    const content = '2026-03-18T10:00:00.000000Z\tinfo\tklog\tconnecting to istiod\n{"totalPushes": 42}\n';
+    expect(tryParseJson(content)).toEqual({ totalPushes: 42 });
+  });
+
+  it("parses a JSON array preceded by log lines (syncz)", () => {
+    const content = 'Warning: port-forward fell back to a slower path\nnote: retrying\n[{"proxy":"a.default","sync_status":"SYNCED"}]';
+    expect(tryParseJson(content)).toEqual([{ proxy: "a.default", sync_status: "SYNCED" }]);
+  });
+
+  it("returns null when the text after the prefix is not JSON", () => {
+    expect(tryParseJson("error: endpoint failed {not json")).toBeNull();
+  });
 });

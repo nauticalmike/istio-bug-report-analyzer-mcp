@@ -1,6 +1,7 @@
 import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
 import type { BugReportStore } from "../archive/store.js";
 import type { ComponentVersion } from "../types.js";
+import { formatCompleteness } from "../archive/completeness.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
 const fromImages = (used: boolean | undefined) => (used ? " [from pod image tags]" : "");
@@ -47,11 +48,13 @@ export async function getOverview(store: BugReportStore) {
     ...(modeInfo.sidecarNamespaces.length > 0 ? [`  Sidecar namespaces: ${modeInfo.sidecarNamespaces.join(", ")}`] : []),
     "",
     `Namespaces with proxies: ${namespaces.length} (${namespaces.join(", ") || "none"})`,
-    `Proxies: ${proxyPods.length} pods`,
+    `Proxies: ${proxyPods.length} pods${staleNote(store)}`,
     `Istiod: ${istiodPods.length} pods`,
     clusterResourcesLine(store),
     "",
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
+    "",
+    ...formatCompleteness(store.getCompleteness()),
   ];
   const warnings = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
   if (warnings.length > 0) lines.push("", ...warnings);
@@ -59,6 +62,14 @@ export async function getOverview(store: BugReportStore) {
   if (issueLines.length > 0) lines.push("", ...issueLines);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+}
+
+// Proxy dirs are counted from the archive; a dir whose pod is gone from the cluster dump
+// (replaced while a long collection ran) is not a live proxy.
+function staleNote(store: BugReportStore): string {
+  const { evaluated, stale } = store.getStaleProxyDirs();
+  if (!evaluated || stale.length === 0) return "";
+  return ` (${stale.length} dir${stale.length === 1 ? "" : "s"} with no live pod in the cluster dump)`;
 }
 
 // The object count needs the full cluster-dump parse (~4x the YAML size in heap);
