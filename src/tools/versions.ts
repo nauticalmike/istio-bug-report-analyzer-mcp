@@ -69,25 +69,72 @@ function describeRevisionError(message: string): string {
 }
 
 const SERVER_INFO_RE = /version\.ServerInfo\{[\s\S]*?\}\}/g;
+// An entry of a multi-line (kr/pretty, istioctl up to ~1.19) MeshInfo ends on its own "    }," line.
+const PRETTY_ENTRY_END_RE = /^ {4}\},?$/;
+
+/** Identical ServerInfo entries of a one-line `%#v` MeshInfo, written once with a count. */
+function collapseOneLine(line: string): string {
+  const counts = new Map<string, number>();
+  for (const m of line.matchAll(SERVER_INFO_RE)) counts.set(m[0], (counts.get(m[0]) ?? 0) + 1);
+  if (counts.size === 0) return line;
+  const entries = [...counts].map(([entry, n]) => (n > 1 ? `${entry} (x${n})` : entry));
+  return `&version.MeshInfo{${entries.join(", ")}}`;
+}
+
+/** Identical entries of a multi-line MeshInfo (opening line, entries, closing "}"), written once with a count. */
+function collapsePretty(block: string[]): string {
+  const counts = new Map<string, number>();
+  let entry: string[] = [];
+  for (const line of block.slice(1, -1)) {
+    entry.push(line);
+    if (!PRETTY_ENTRY_END_RE.test(line)) continue;
+    const text = entry.join("\n");
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+    entry = [];
+  }
+  const entries = [...counts].map(([text, n]) => (n > 1 ? `${text} (x${n})` : text));
+  return [block[0], ...entries, ...entry, block[block.length - 1]].join("\n");
+}
+
+/**
+ * The lines of the versions file with each multi-line MeshInfo (from its opening line to the
+ * "}" at column 0) joined into one element, so a block is handled like a one-line MeshInfo.
+ */
+function logicalLines(raw: string): string[] {
+  const lines = raw.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!/^&version\.MeshInfo\{\s*$/.test(line)) {
+      out.push(line);
+      continue;
+    }
+    const end = lines.findIndex((l, j) => j > i && l === "}");
+    if (end === -1) {
+      out.push(line);
+      continue;
+    }
+    out.push(collapsePretty(lines.slice(i, end + 1)));
+    i = end;
+  }
+  return out;
+}
 
 /**
  * The raw versions file with each MeshInfo's identical istiod entries written once with a
  * count, and revisions whose (collapsed) MeshInfo is identical merged into one block.
- * A large control plane otherwise prints one ServerInfo per istiod pod per revision.
+ * A large control plane otherwise prints one ServerInfo per istiod pod per revision. Both
+ * the one-line `%#v` MeshInfo and the multi-line kr/pretty one of older istioctl are handled.
  */
 export function collapseMeshInfo(raw: string): string {
   if (!raw.includes("MeshInfo{")) return raw;
   const collapseLine = (line: string): string => {
     if (!line.includes("MeshInfo{")) return line;
-    const counts = new Map<string, number>();
-    for (const m of line.matchAll(SERVER_INFO_RE)) counts.set(m[0], (counts.get(m[0]) ?? 0) + 1);
-    if (counts.size === 0) return line;
-    const entries = [...counts].map(([entry, n]) => (n > 1 ? `${entry} (x${n})` : entry));
-    return `&version.MeshInfo{${entries.join(", ")}}`;
+    return line.includes("\n") ? line : collapseOneLine(line);
   };
 
   // Group "Revision X:" + MeshInfo pairs by their collapsed MeshInfo, keeping first-seen order.
-  const lines = raw.split("\n");
+  const lines = logicalLines(raw);
   const out: string[] = [];
   const groups = new Map<string, { revisions: string[]; index: number }>();
   for (let i = 0; i < lines.length; i++) {

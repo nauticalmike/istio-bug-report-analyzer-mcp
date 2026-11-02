@@ -91,6 +91,29 @@ describe("versions tool", () => {
     expect(raw).toContain("Revisions a, b, c (same MeshInfo, x3):");
   });
 
+  // istioctl up to ~1.19 wrote each MeshInfo with kr/pretty: one field per line, `}` at column 0 closing it.
+  const prettyEntry = (v: string) =>
+    ["    {", '        Component: "pilot",', '        Revision:  "default",', `        Info:      ${buildInfo(v)},`, "    },"].join("\n");
+  const prettyMeshInfo = (entries: string[]) => ["&version.MeshInfo{", ...entries, "}"].join("\n");
+
+  it("collapses identical entries of a multi-line (kr/pretty) MeshInfo with a count", async () => {
+    const entries = [...Array.from({ length: 40 }, () => prettyEntry("1.18.7")), prettyEntry("1.18.6")];
+    const versions = bugReportVersions({ client: "1.18.7", revisions: [{ rev: "default", body: prettyMeshInfo(entries) }], proxies: ["1.18.7"] });
+    const text = await versionsText(versions);
+    const raw = text.slice(text.indexOf("Raw version output:"));
+    expect(raw.split('Version:"1.18.7"').length - 1).toBe(2); // the CLI line and one entry
+    expect(raw).toContain("    }, (x40)");
+    expect(raw).toContain('Version:"1.18.6"');
+    expect(raw.split("\n").length).toBeLessThan(30);
+    expect(text).not.toContain("Revisions without a control plane version");
+  });
+
+  it("merges revisions whose multi-line MeshInfo is identical", async () => {
+    const body = prettyMeshInfo([prettyEntry("1.18.7"), prettyEntry("1.18.7")]);
+    const text = await versionsText(bugReportVersions({ client: "1.18.7", revisions: [{ rev: "a", body }, { rev: "b", body }], proxies: ["1.18.7"] }));
+    expect(text).toContain("Revisions a, b (same MeshInfo, x2):");
+  });
+
   it("reports a revision without running istiod as a tag or idle revision, not as missing data", async () => {
     const text = await versionsText(bugReportVersions({
       client: "1.31.2",

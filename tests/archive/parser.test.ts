@@ -130,6 +130,8 @@ describe("parseVersionsFile", () => {
     expect(v.clientVersion).toBe("1.30.2-solo");
     expect(v.controlPlaneVersions).toEqual([{ revision: "default", version: "1.29.9-solo" }]);
     expect(v.proxyVersions).toEqual([{ version: "1.29.9-solo", count: 0 }]);
+    // The lines of the pretty-printed MeshInfo are not errors; only the canary revision's is.
+    expect(v.controlPlaneErrors).toEqual([{ revision: "canary", message: 'no running Istio pods in namespace "istio-system"' }]);
   });
 
   it("extracts versions from the legacy single-line format", () => {
