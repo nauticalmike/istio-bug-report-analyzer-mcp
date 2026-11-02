@@ -38,7 +38,7 @@ Then restart Claude Code to pick up the new skill.
 | Tool | Description |
 |------|-------------|
 | `collect_bug_report` | Run `istioctl bug-report` against a cluster and load results |
-| `load_bug_report` | Load an existing archive or directory; reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
+| `load_bug_report` | Load an existing archive or directory; checks free space before extracting (`extract_dir` picks where), reports collection errors found in `bug-report.log` and warns when a cluster dump will not fit in the heap |
 | `get_overview` | High-level mesh overview, data plane mode (sidecar / ambient / interop), collection issues and cluster dump size warnings |
 | `get_versions` | Version matrix with skew detection |
 | `get_analyze_results` | `istioctl analyze` results (IST codes), with a count per code; paged with `limit`/`offset` |
@@ -93,6 +93,12 @@ Cluster dumps (`cluster/k8s-resources` and friends) are parsed on first use, one
 ```json
 "env": { "NODE_OPTIONS": "--max-old-space-size=8192" }
 ```
+
+### Disk space for `.tar.gz` archives
+
+Bug-report archives are mostly text and expand 10–30× when extracted. `load_bug_report` extracts a `.tar.gz` into a new `bug-report-extract-*` directory under the system temp directory, or under `extract_dir` when given (an existing directory, for example on a larger volume). Before extracting it compares the free space there with the expanded size read from the gzip trailer, and refuses with a message if it does not fit. Above 4 GiB expanded that size cannot be read exactly, so the load warns when free space is below the worst case and goes ahead. A disk that fills up during extraction fails the load and the partial extraction is deleted.
+
+The extracted directory is deleted when another report is loaded and when the server exits (including on SIGINT, SIGTERM and SIGHUP). Only directories the server created are deleted: a directory you load yourself is never touched. A server killed with SIGKILL cannot clean up; remove leftover `bug-report-extract-*` directories by hand.
 
 ## Supported Istio Versions
 

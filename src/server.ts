@@ -53,9 +53,12 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "load_bug_report",
-    "Load an existing istioctl bug-report archive (.tar.gz) or pre-extracted directory for analysis. Warns up front, from file sizes, when a cluster dump will not fit in the server heap.",
-    { path: z.string().describe("Path to .tar.gz archive or pre-extracted directory") },
-    async ({ path }) => loadBugReport({ path }, getStore, setStore, setSession),
+    "Load an existing istioctl bug-report archive (.tar.gz) or pre-extracted directory for analysis. Archives are extracted to a temporary directory after a free-space check; it is deleted when another report is loaded or the server exits. Warns up front, from file sizes, when a cluster dump will not fit in the server heap.",
+    {
+      path: z.string().describe("Path to .tar.gz archive or pre-extracted directory"),
+      extract_dir: z.string().optional().describe("Existing directory to extract a .tar.gz into (default: the system temp directory). Use a larger volume for big archives."),
+    },
+    async ({ path, extract_dir }) => loadBugReport({ path, extract_dir }, getStore, setStore, setSession),
   );
 
   server.tool(
