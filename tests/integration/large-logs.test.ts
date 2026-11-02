@@ -89,7 +89,8 @@ describe("log tools on logs larger than the heap", () => {
     const r = runChild(script, [archiveDir, "errors"], HEAP_MB);
     expectOk(r);
     expect(r.out.text).toMatch(/^=== \d+ unique error patterns found \(\d+ total lines\) ===/);
-    expect(r.out.text).toContain("[x");
+    // Ranked above the noise, so on the first page without any filter.
+    expect(r.out.text).toContain("SYNTHETIC-RARE-ERROR");
     const rare = runChild(script, [archiveDir, "errors", JSON.stringify({ keyword: "synthetic-" })], HEAP_MB);
     expectOk(rare);
     expect(rare.out.text).toContain("SYNTHETIC-RARE-ERROR");
@@ -150,8 +151,9 @@ describe.skipIf(!RUN_LARGE)("log tools on files past the V8 string limit (RUN_LA
     expect(r.out.maxRssMb).toBeLessThan(1024);
     expect(r.out.text).toMatch(/^=== \d+ unique error patterns found \(\d+ total lines\) ===/);
     // The one real error outranks millions of noise lines.
-    const blocks = r.out.text!.split("\n\n");
-    expect(blocks[1]).toContain("SYNTHETIC-RARE-ERROR");
+    const text = r.out.text!;
+    expect(text).toContain("SYNTHETIC-RARE-ERROR");
+    expect(text.indexOf("SYNTHETIC-RARE-ERROR")).toBeLessThan(text.indexOf("[noise: "));
   }, 900_000);
 
   it("a 600MB bug-report.log yields its collection issues", () => {

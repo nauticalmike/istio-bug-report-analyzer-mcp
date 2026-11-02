@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
 import { BugReportStore } from "../../src/archive/store.js";
 import { findErrors } from "../../src/tools/find-errors.js";
+import { noisyProxyLogBlock } from "../fixtures/create-log-fixture.js";
 
 describe("findErrors", () => {
   let store: BugReportStore;
@@ -62,6 +63,61 @@ describe("findErrors", () => {
     const result = await findErrors(store, {});
     const text = (result.content[0] as { type: "text"; text: string }).text;
     expect(text).toMatch(/\d+ unique/);
+  });
+});
+
+describe("findErrors grouping", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+  const textOf = async (params: Parameters<typeof findErrors>[1] = {}) =>
+    ((await findErrors(store, params)).content[0] as { type: "text"; text: string }).text;
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "errors-grouping-"));
+    const archiveDir = join(tempDir, "bug-report");
+    // 10k lines per pod that differ only in normalized tokens: five patterns, three pods.
+    for (const pod of ["web-a", "web-b", "web-c"]) {
+      const dir = join(archiveDir, "proxies", "shop", pod);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, "istio-proxy.log"), noisyProxyLogBlock(10_000));
+    }
+    await appendFile(
+      join(archiveDir, "proxies", "shop", "web-c", "istio-proxy.log"),
+      "2026-01-01T01:00:00.000000Z\terror\tca\tRARE-REAL-ERROR certificate signing failed\n",
+    );
+    store = await BugReportStore.fromDirectory(archiveDir);
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("collapses lines that differ only in volatile tokens", async () => {
+    const text = await textOf();
+    expect(text).toContain("=== 6 unique error patterns found (30001 total lines) ===");
+  });
+
+  it("counts the distinct pods of each pattern", async () => {
+    const text = await textOf();
+    expect(text).toMatch(/\[x6000\] proxy\/shop\/web-a \(3 pods\) \[error\]\n {2}Pattern: error cache secret fetch/);
+    expect(text).toMatch(/\[x1\] proxy\/shop\/web-c \[error\]\n {2}Pattern: error ca RARE-REAL-ERROR/);
+  });
+
+  it("ranks errors above warnings, then by count, and known noise last", async () => {
+    const text = await textOf();
+    const order = ["secret fetch", "RARE-REAL-ERROR", "upstream <IP> reset", "health check failed", "failed scraping", "Request to probe app"].map((s) => text.indexOf(s));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(text).toMatch(/\[x6000\] proxy\/shop\/web-a \(3 pods\) \[error\] \[noise: metrics scrape\]/);
+    expect(text).toMatch(/\[x6000\] proxy\/shop\/web-a \(3 pods\) \[warn\] \[noise: probe\]/);
+  });
+
+  it("keeps the ranking across pages", async () => {
+    const first = await textOf({ limit: 2 });
+    expect(first).toContain("RARE-REAL-ERROR");
+    expect(first).toContain("Showing patterns 1-2 of 6. Pass offset=2 for more");
+    const last = await textOf({ limit: 2, offset: 4 });
+    expect(last).toContain("Request to probe app");
   });
 });
 
