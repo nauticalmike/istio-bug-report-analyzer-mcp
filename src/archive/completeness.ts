@@ -236,9 +236,11 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
     for (const text of [issue.message, ...(issue.details ?? [])]) {
       const kind = LOG_PROBLEMS.find(({ re }) => re.test(text))?.kind;
       if (!kind) continue;
+      // A bullet seen N times under one header ends in " (xN)".
+      const count = issue.count * Number(/ \(x(\d+)\)$/.exec(text)?.[1] ?? 1);
       const hit = hits.get(kind);
-      if (hit) hit.count += issue.count;
-      else hits.set(kind, { count: issue.count, example: text.slice(0, 200) });
+      if (hit) hit.count += count;
+      else hits.set(kind, { count, example: text.slice(0, 200) });
     }
   }
   const overflow = scan.overflowLines ?? 0;

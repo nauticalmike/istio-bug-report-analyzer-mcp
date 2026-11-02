@@ -88,6 +88,28 @@ describe("parseCollectionIssues multi-error details", () => {
     expect(issues[1]).toMatchObject({ message: "1 error occurred:", details: ["context deadline exceeded"] });
   });
 
+  it("finds the header after a message prefix", () => {
+    const issues = parseCollectionIssues(
+      ["Error: failed to collect logs for istio-system/ztunnel-x7k2p: 1 error occurred:", "\t* container ztunnel is not running", ""].join("\n"),
+    );
+    expect(issues).toEqual([
+      { level: "error", message: "failed to collect logs for istio-system/ztunnel-x7k2p: 1 error occurred:", count: 1, details: ["container ztunnel is not running"] },
+    ]);
+  });
+
+  it("does not take a message that merely ends in 'errors occurred:' text without a separator as a header", () => {
+    const issues = parseCollectionIssues(["Error: retried20 errors occurred:", "\t* not a bullet of it"].join("\n"));
+    expect(issues[0].details).toBeUndefined();
+  });
+
+  it("writes identical bullets once with a count", () => {
+    const issues = parseCollectionIssues(
+      ["Error: 4 errors occurred:", "\t* context deadline exceeded", "\t* context deadline exceeded", "\t* the server is busy", "\t* context deadline exceeded", ""].join("\n"),
+    );
+    expect(issues[0].details).toEqual(["context deadline exceeded (x3)", "the server is busy"]);
+    expect(formatCollectionIssues(issues).join("\n")).toContain("      * context deadline exceeded (x3)");
+  });
+
   it("treats headers with different details as different issues", () => {
     const issues = parseCollectionIssues([MULTI_ERROR_LOG, MULTI_ERROR_LOG.replace("deadline exceeded", "canceled")].join("\n"));
     expect(issues.map((i) => [i.message, i.count])).toEqual([["3 errors occurred:", 2], ["1 error occurred:", 1], ["1 error occurred:", 1]]);

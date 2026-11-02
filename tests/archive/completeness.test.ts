@@ -242,6 +242,11 @@ describe("data completeness verdict", () => {
     expect(s.summary).toMatch(/auth x2/);
   });
 
+  it("counts each repeat of an identical bullet under a header", async () => {
+    await writeFile(join(dir, "bug-report.log"), "Error: 3 errors occurred:\n\t* failed to get proxy-a: Forbidden\n\t* failed to get proxy-a: Forbidden\n\t* failed to get proxy-a: Forbidden\n");
+    expect((await signal("bug-report-log")).summary).toMatch(/auth x3/);
+  });
+
   it("says when versions come from pod image tags instead of calling them unknown", async () => {
     await writeFile(join(dir, "versions"), unretrievableVersions("1.31.2"));
     await writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: [istiodPod("istiod-7f9c-abcde", "1.31.2"), sidecarPod("shop", "cart-1", "1.31.2")] }));

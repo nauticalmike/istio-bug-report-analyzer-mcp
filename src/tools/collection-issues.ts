@@ -6,7 +6,7 @@ export interface CollectionIssue {
   level: LogLevel;
   message: string;
   count: number;
-  /** The "\t* ..." bullets under an "N errors occurred:" header. */
+  /** The "\t* ..." bullets under an "N errors occurred:" header; a bullet seen more than once ends in " (xN)". */
   details?: string[];
   /** Bullets beyond those kept in `details`. */
   moreDetails?: number;
@@ -30,14 +30,16 @@ const COBRA_ERROR_RE = /^Error:\s*(.+)$/;
 // Istio's log rate limiter collapses duplicates into one line with this suffix.
 const REPEATED_SUFFIX_RE = /\s+\(repeated (\d+) times\)$/;
 // hashicorp/go-multierror, used by istioctl: "N errors occurred:" then one "\t* <error>" line each.
-const MULTI_ERROR_HEADER_RE = /^\d+ errors? occurred:$/;
+// The header can follow a message prefix ("failed to ...: 1 error occurred:").
+const MULTI_ERROR_HEADER_RE = /(?:^|:\s)\d+ errors? occurred:$/;
 const DETAIL_BULLET_RE = /^\s+\*\s+(.*)$/;
 
 interface PendingIssue {
   level: LogLevel;
   message: string;
   occurrences: number;
-  details: string[];
+  /** Distinct bullets in first-seen order, with how often each appeared. */
+  details: Map<string, number>;
   moreDetails: number;
 }
 
@@ -62,7 +64,11 @@ export class CollectionIssueCollector {
     if (this.pending) {
       const bullet = DETAIL_BULLET_RE.exec(untrimmed);
       if (bullet) {
-        if (this.pending.details.length < MAX_DETAILS) this.pending.details.push(bullet[1].slice(0, MAX_MESSAGE_CHARS));
+        const text = bullet[1].slice(0, MAX_MESSAGE_CHARS);
+        const { details } = this.pending;
+        const seen = details.get(text);
+        if (seen !== undefined) details.set(text, seen + 1);
+        else if (details.size < MAX_DETAILS) details.set(text, 1);
         else this.pending.moreDetails++;
         return;
       }
@@ -92,7 +98,7 @@ export class CollectionIssueCollector {
 
     // The header says only how many errors there were; its bullets follow on the next lines.
     if (MULTI_ERROR_HEADER_RE.test(message)) {
-      this.pending = { level, message, occurrences, details: [], moreDetails: 0 };
+      this.pending = { level, message, occurrences, details: new Map(), moreDetails: 0 };
       return;
     }
     this.record(level, message, occurrences);
@@ -107,7 +113,8 @@ export class CollectionIssueCollector {
     const p = this.pending;
     if (!p) return;
     this.pending = null;
-    this.record(p.level, p.message, p.occurrences, p.details, p.moreDetails);
+    const details = [...p.details].map(([text, n]) => (n > 1 ? `${text} (x${n})` : text));
+    this.record(p.level, p.message, p.occurrences, details, p.moreDetails);
   }
 
   private record(level: LogLevel, message: string, occurrences: number, details: string[] = [], moreDetails = 0): void {
