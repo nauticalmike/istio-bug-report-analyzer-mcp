@@ -100,7 +100,9 @@ export function parseVersionsFile(content: string): VersionInfo {
   return result;
 }
 
-const BUILD_INFO_VERSION_RE = /BuildInfo\{Version:"([^"]*)"/g;
+// One-line `%#v` (BuildInfo{Version:"1.31.2", ...}) and kr/pretty, which puts each field on its
+// own line (BuildInfo{\n    Version:       "1.18.7",\n ...}): the match spans the line break.
+const BUILD_INFO_VERSION_RE = /BuildInfo\{\s*Version:\s*"([^"]*)"/g;
 
 // bug-report records no per-version proxy counts, so count 0 means "unknown".
 function parseBugReportVersions(content: string, result: VersionInfo): void {
@@ -109,8 +111,20 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
   let cpRevision: string | null = null;
   // Inside a multi-line (kr/pretty) MeshInfo, which runs to a "}" at column 0.
   let inMeshInfo = false;
+  // The lines of that MeshInfo, read for versions once it closes; and the CLI section's text so far.
+  let meshLines: string[] = [];
+  let cliText = "";
   const cpSeen = new Set<string>();
   const proxySeen = new Set<string>();
+
+  const addCpVersions = (revision: string, text: string) => {
+    for (const m of text.matchAll(BUILD_INFO_VERSION_RE)) {
+      const key = `${revision}\u0000${m[1]}`;
+      if (!m[1] || cpSeen.has(key)) continue;
+      cpSeen.add(key);
+      result.controlPlaneVersions.push({ revision, version: m[1] });
+    }
+  };
 
   for (const rawLine of content.split("\n")) {
     const line = rawLine.replace(/\r$/, "");
@@ -131,7 +145,8 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
 
     if (section === "cli") {
       if (result.clientVersion === null) {
-        const m = /BuildInfo\{Version:"([^"]*)"/.exec(line);
+        cliText += `${line}\n`;
+        const m = new RegExp(BUILD_INFO_VERSION_RE.source).exec(cliText);
         if (m && m[1]) result.clientVersion = m[1];
       }
     } else if (section === "cp") {
@@ -141,9 +156,18 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
         continue;
       }
       if (cpRevision === null) continue;
-      if (/^&version\.MeshInfo\{\s*$/.test(line)) inMeshInfo = true;
-      else if (inMeshInfo && line === "}") {
+      if (/^&version\.MeshInfo\{\s*$/.test(line)) {
+        inMeshInfo = true;
+        meshLines = [];
+        continue;
+      }
+      if (inMeshInfo) {
+        if (line !== "}") {
+          meshLines.push(line);
+          continue;
+        }
         inMeshInfo = false;
+        addCpVersions(cpRevision, meshLines.join("\n"));
         continue;
       }
       // istioctl writes the error in place of the MeshInfo, e.g. "no running Istio pods in
@@ -154,12 +178,7 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
         if (!errors.some((e) => e.revision === rev)) errors.push({ revision: rev, message: line.trim() });
         continue;
       }
-      for (const m of line.matchAll(BUILD_INFO_VERSION_RE)) {
-        const key = `${cpRevision}\u0000${m[1]}`;
-        if (!m[1] || cpSeen.has(key)) continue;
-        cpSeen.add(key);
-        result.controlPlaneVersions.push({ revision: cpRevision, version: m[1] });
-      }
+      addCpVersions(cpRevision, line);
     } else if (section === "proxy") {
       const m = /^Revision .+?: Versions \{(.*)\}\s*$/.exec(line);
       if (!m) continue;

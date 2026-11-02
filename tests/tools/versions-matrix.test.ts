@@ -108,6 +108,27 @@ describe("versions tool", () => {
     expect(text).not.toContain("Revisions without a control plane version");
   });
 
+  it("collapses a kr/pretty MeshInfo whose BuildInfo is multi-line too, and reads its versions", async () => {
+    const nested = (v: string) =>
+      [
+        "    {",
+        '        Component: "pilot",',
+        '        Revision:  "default",',
+        "        Info:      version.BuildInfo{",
+        `            Version:       "${v}",`,
+        '            BuildStatus:   "Clean",',
+        "        },",
+        "    },",
+      ].join("\n");
+    const entries = [...Array.from({ length: 12 }, () => nested("1.18.7")), nested("1.18.6")];
+    const text = await versionsText(bugReportVersions({ client: "1.18.7", revisions: [{ rev: "default", body: prettyMeshInfo(entries) }], proxies: ["1.18.7"] }));
+    const raw = text.slice(text.indexOf("Raw version output:"));
+    expect(raw).toContain("    }, (x12)");
+    expect(raw.split('Version:       "1.18.7"').length - 1).toBe(1);
+    expect(text).toMatch(/1\.18\.6/);
+    expect(text).not.toContain("Revisions without a control plane version");
+  });
+
   it("merges revisions whose multi-line MeshInfo is identical", async () => {
     const body = prettyMeshInfo([prettyEntry("1.18.7"), prettyEntry("1.18.7")]);
     const text = await versionsText(bugReportVersions({ client: "1.18.7", revisions: [{ rev: "a", body }, { rev: "b", body }], proxies: ["1.18.7"] }));

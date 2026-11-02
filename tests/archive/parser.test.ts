@@ -134,6 +134,52 @@ describe("parseVersionsFile", () => {
     expect(v.controlPlaneErrors).toEqual([{ revision: "canary", message: 'no running Istio pods in namespace "istio-system"' }]);
   });
 
+  it("parses kr/pretty output where BuildInfo is itself multi-line", () => {
+    // istioctl up to ~1.19 printed MeshInfo with kr/pretty, which also breaks each nested struct.
+    const prettyBuildInfo = (v: string, indent: string) => [
+      "version.BuildInfo{",
+      `${indent}    Version:       "${v}",`,
+      `${indent}    GitRevision:   "0000000000000000000000000000000000000000",`,
+      `${indent}    GolangVersion: "",`,
+      `${indent}    BuildStatus:   "Clean",`,
+      `${indent}    GitTag:        "${v}",`,
+      `${indent}}`,
+    ].join("\n");
+    const entry = (v: string, rev: string) => [
+      "    {",
+      '        Component: "pilot",',
+      `        Revision:  "${rev}",`,
+      `        Info:      ${prettyBuildInfo(v, "        ")},`,
+      "    },",
+    ].join("\n");
+    const input = [
+      "CLI version:",
+      prettyBuildInfo("1.18.7", ""),
+      "",
+      "The following Istio control plane revisions/versions were found in the cluster:",
+      "Revision default:",
+      "&version.MeshInfo{",
+      entry("1.18.7", "default"),
+      entry("1.18.6", "default"),
+      "}",
+      "",
+      "Revision canary:",
+      'no running Istio pods in namespace "istio-system"',
+      "",
+      "The following proxy revisions/versions were found in the cluster:",
+      "Revision default: Versions {1.18.7, 1.18.6}",
+    ].join("\n");
+    const v = parseVersionsFile(input);
+    expect(v.clientVersion).toBe("1.18.7");
+    expect(v.controlPlaneVersions).toEqual([
+      { revision: "default", version: "1.18.7" },
+      { revision: "default", version: "1.18.6" },
+    ]);
+    expect(v.controlPlaneErrors).toEqual([{ revision: "canary", message: 'no running Istio pods in namespace "istio-system"' }]);
+    // The one-line form still parses with the same expression.
+    expect(parseVersionsFile(`CLI version:\n${bi("1.31.2", "go1.25.1")}\n`).clientVersion).toBe("1.31.2");
+  });
+
   it("extracts versions from the legacy single-line format", () => {
     const input = "client version: 1.29.1\ncontrol plane version: 1.29.1\ndata plane version: 1.29.1 (2 proxies)\n";
     const v = parseVersionsFile(input);
