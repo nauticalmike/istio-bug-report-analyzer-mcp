@@ -121,6 +121,34 @@ describe("findErrors grouping", () => {
   });
 });
 
+describe("findErrors limits", () => {
+  let tempDir: string;
+  let store: BugReportStore;
+  // Distinct letters-only words, which no normalization rule touches.
+  const word = (n: number) => n.toString(26).replace(/./g, (c) => String.fromCharCode(97 + parseInt(c, 26)));
+
+  beforeAll(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "errors-limits-"));
+    const dir = join(tempDir, "bug-report", "proxies", "big", "many-pod-0");
+    await mkdir(dir, { recursive: true });
+    const lines = Array.from({ length: 20_005 }, (_, i) => `2026-01-01T00:00:00Z\terror\tdistinct failure ${word(i)}`);
+    lines.push(`2026-01-01T00:00:00Z\terror\tlong ${"x".repeat(1024 * 1024 + 10)}`);
+    await writeFile(join(dir, "istio-proxy.log"), lines.join("\n") + "\n");
+    store = await BugReportStore.fromDirectory(join(tempDir, "bug-report"));
+  });
+
+  afterAll(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("says when lines fell past the pattern cap or were cut, instead of dropping them silently", async () => {
+    const text = ((await findErrors(store, { limit: 1 })).content[0] as { type: "text"; text: string }).text;
+    expect(text).toContain("=== 20000 unique error patterns found (20006 total lines) ===");
+    expect(text).toContain("Note: 6 line(s) matched none of the first 20,000 patterns and are only counted in the total");
+    expect(text).toContain("Note: 1 line(s) longer than 1 MB were matched on their first 1 MB only.");
+  });
+});
+
 describe("findErrors with an unreadable log", () => {
   let tempDir: string;
   let logPath: string;

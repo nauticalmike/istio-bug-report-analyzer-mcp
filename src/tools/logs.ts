@@ -66,7 +66,6 @@ export async function getLogs(
     return { content: [{ type: "text" as const, text: ["No log lines found matching the filter.", ...notes].join("\n") }] };
   }
 
-
   // With offset: page forward from the oldest matching line. Without: the most recent lines.
   let start: number;
   let shown: string[];
