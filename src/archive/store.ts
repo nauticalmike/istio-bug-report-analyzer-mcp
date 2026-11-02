@@ -5,6 +5,7 @@ import { readArchiveDirectory, type ArchiveIndex } from "./extractor.js";
 import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
+import { needsImageFallback, withImageFallback } from "./image-versions.js";
 import type {
   VersionInfo,
   AnalyzeResult,
@@ -113,6 +114,7 @@ export class BugReportStore {
   private clusterLoadIssues: string[] = [];
   private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
+  private effectiveVersions: VersionInfo | null | undefined = undefined;
 
   private constructor(index: ArchiveIndex) {
     this.index = index;
@@ -306,8 +308,22 @@ export class BugReportStore {
 
   // === Public Query Methods ===
 
+  /** The `versions` file as parsed, without any fallback. */
   getVersions(): VersionInfo | null {
     return this.versions;
+  }
+
+  /**
+   * The versions file completed from pod image tags (see withImageFallback). The pod dump is
+   * parsed for this only when the file is missing or lists no control plane or proxy
+   * versions; otherwise image versions (ztunnel, istio-cni) are added once the cluster dumps
+   * have been parsed by another tool.
+   */
+  getEffectiveVersions(): VersionInfo | null {
+    if (this.effectiveVersions !== undefined) return this.effectiveVersions;
+    if (!needsImageFallback(this.versions) && !this.isClusterResourcesParsed()) return this.versions;
+    this.effectiveVersions = withImageFallback(this.versions, this.getClusterResources({ kind: "Pod" }));
+    return this.effectiveVersions;
   }
 
   getAnalyzeResults(filter?: { severity?: string; code?: string }): AnalyzeResult[] {

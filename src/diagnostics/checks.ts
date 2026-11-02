@@ -126,7 +126,7 @@ export function demoProfileEvidence(store: BugReportStore): Issue[] {
 export function singleReplicaIstiods(store: BugReportStore): Issue[] {
   const istiods = istiodDeployments(store);
   if (istiods.length > 0) {
-    const cpVersions = store.getVersions()?.controlPlaneVersions ?? [];
+    const cpVersions = store.getEffectiveVersions()?.controlPlaneVersions ?? [];
     // The istiod chart moved these values from `pilot.*` to the top level in 1.24.
     const helmKey = (d: ParsedResource, key: "autoscaleMin" | "replicaCount"): string => {
       const rev = d.metadata.labels?.["istio.io/rev"] ?? "default";
@@ -196,7 +196,7 @@ function minorOf(version: string): { major: number; minor: number } | null {
 
 /** "yes" when every parsable control-plane version is >= 1.19, "no" when any is older, "unknown" otherwise. */
 function controlPlaneDropsLegacyNames(store: BugReportStore): "yes" | "no" | "unknown" {
-  const minors = (store.getVersions()?.controlPlaneVersions ?? [])
+  const minors = (store.getEffectiveVersions()?.controlPlaneVersions ?? [])
     .map((v) => minorOf(v.version))
     .filter((m): m is { major: number; minor: number } => m !== null);
   if (minors.length === 0) return "unknown";
@@ -209,18 +209,12 @@ function controlPlaneDropsLegacyNames(store: BugReportStore): "yes" | "no" | "un
  * Running proxy versions: from the versions file, else from the image tags of
  * istio-proxy containers (sidecar or native-sidecar init container) in the pod dump.
  */
-function runningProxyVersions(store: BugReportStore, pods: ParsedResource[]): { versions: string[]; fromImages: boolean } {
-  const fromFile = (store.getVersions()?.proxyVersions ?? []).map((v) => v.version).filter((v) => minorOf(v));
-  if (fromFile.length > 0) return { versions: fromFile, fromImages: false };
-  const tags = new Set<string>();
-  for (const p of pods) {
-    for (const c of [...list(p.spec?.containers), ...list(p.spec?.initContainers)].map(obj)) {
-      if (c?.name !== "istio-proxy" || typeof c.image !== "string") continue;
-      const tag = /:([^:/@]+)(?:@.*)?$/.exec(c.image)?.[1];
-      if (tag && minorOf(tag)) tags.add(tag);
-    }
-  }
-  return { versions: [...tags].sort(), fromImages: true };
+function runningProxyVersions(store: BugReportStore): { versions: string[]; fromImages: boolean } {
+  const versions = store.getEffectiveVersions();
+  return {
+    versions: (versions?.proxyVersions ?? []).map((v) => v.version).filter((v) => minorOf(v)),
+    fromImages: versions?.fromImages?.proxies ?? false,
+  };
 }
 
 type ProxyVersionRegex = { re: RegExp } | { goOnly: true } | { invalid: true };
@@ -271,7 +265,7 @@ export function riskyEnvoyFilters(store: BugReportStore): Issue[] {
 
   const rootNamespace = (meshConfig(store)?.rootNamespace as string | undefined) ?? "istio-system";
   const pods = store.getClusterResources({ kind: "Pod" });
-  const { versions: proxyVersions, fromImages } = runningProxyVersions(store, pods);
+  const { versions: proxyVersions, fromImages } = runningProxyVersions(store);
   const versionList = `${proxyVersions.join(", ")}${fromImages ? "; from istio-proxy image tags" : ""}`;
   const dropsLegacyNames = controlPlaneDropsLegacyNames(store);
   const issues: Issue[] = [];

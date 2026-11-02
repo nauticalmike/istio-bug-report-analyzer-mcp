@@ -1,9 +1,18 @@
 import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
 import type { BugReportStore } from "../archive/store.js";
+import type { ComponentVersion } from "../types.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
+const fromImages = (used: boolean | undefined) => (used ? " [from pod image tags]" : "");
+
+function componentLine(label: string, list: ComponentVersion[] | undefined): string[] {
+  if (!list || list.length === 0) return [];
+  return [`${label}: ${list.map((v) => `${v.version} (${v.count} pod${v.count === 1 ? "" : "s"})`).join(", ")} [from pod image tags]`];
+}
+
 export async function getOverview(store: BugReportStore) {
-  const versions = store.getVersions();
+  // Falls back to pod image tags when the versions file is missing or has no versions.
+  const versions = store.getEffectiveVersions();
   const analyzeResults = store.getAnalyzeResults();
   const proxyPods = store.getProxyPods();
   const istiodPods = store.getIstiodPods();
@@ -29,8 +38,10 @@ export async function getOverview(store: BugReportStore) {
     "=== Istio Mesh Overview ===",
     "",
     `Istio Version: ${versions?.clientVersion ?? "unknown"}`,
-    `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}`,
-    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}`,
+    `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.controlPlane)}`,
+    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.proxies)}`,
+    ...componentLine("ztunnel", versions?.ztunnelVersions),
+    ...componentLine("istio-cni", versions?.cniVersions),
     `Data Plane Mode: ${modeInfo.mode} (${modeCounts.join(", ")})`,
     ...(modeInfo.ambientNamespaces.length > 0 ? [`  Ambient namespaces: ${modeInfo.ambientNamespaces.join(", ")}`] : []),
     ...(modeInfo.sidecarNamespaces.length > 0 ? [`  Sidecar namespaces: ${modeInfo.sidecarNamespaces.join(", ")}`] : []),

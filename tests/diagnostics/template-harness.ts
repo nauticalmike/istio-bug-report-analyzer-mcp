@@ -15,6 +15,8 @@ export interface ArchiveSpec {
   /** Written as cluster/k8s-resources (a kind: List). */
   resources?: Obj[];
   versions?: string;
+  /** Removes the versions file. */
+  noVersions?: boolean;
   /** Replaces istiod's debug/mesh; null removes it. */
   meshDebug?: Obj | null;
   /** Replaces the fixture's single istiod pod directory with these pod names. */
@@ -38,6 +40,7 @@ export async function runTemplates(spec: ArchiveSpec, categories: string[]): Pro
   await writeFile(join(archiveDir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items: spec.resources ?? [] }));
   if (spec.noPodDump) await rm(join(archiveDir, "cluster", "pods"));
   if (spec.versions) await writeFile(join(archiveDir, "versions"), spec.versions);
+  if (spec.noVersions) await rm(join(archiveDir, "versions"));
   if (spec.meshDebug !== undefined) {
     const meshPath = join(archiveDir, "istio", "istio-system", "istiod-abc", "debug", "mesh");
     if (spec.meshDebug === null) await rm(meshPath);
@@ -63,6 +66,35 @@ export function finding(findings: DiagnosticFinding[], id: string): DiagnosticFi
 
 export function pod(namespace: string, name: string, labels: Obj, containers: Obj[] = []): Obj {
   return { apiVersion: "v1", kind: "Pod", metadata: { name, namespace, labels }, spec: { containers } };
+}
+
+/** An injected application pod: app container plus an istio-proxy sidecar on the given proxyv2 tag. */
+export function sidecarPod(namespace: string, name: string, tag: string, labels: Obj = { app: name }): Obj {
+  return pod(namespace, name, labels, [
+    { name: "app", image: "registry.example.com/app:2.0" },
+    { name: "istio-proxy", image: `docker.io/istio/proxyv2:${tag}`, args: ["proxy", "sidecar"] },
+  ]);
+}
+
+/** An istiod pod running the given pilot tag. */
+export function istiodPod(name: string, tag: string, revision?: string): Obj {
+  const labels: Obj = { app: "istiod", ...(revision ? { "istio.io/rev": revision } : {}) };
+  return pod("istio-system", name, labels, [{ name: "discovery", image: `docker.io/istio/pilot:${tag}` }]);
+}
+
+/** The bug-report versions file when istioctl could not list the istiod pods. */
+export function unretrievableVersions(client: string): string {
+  return [
+    "CLI version:",
+    `version.BuildInfo{Version:"${client}", GitRevision:"0000000000000000000000000000000000000000", GolangVersion:"go1.25.1", BuildStatus:"Clean", GitTag:"${client}"}`,
+    "",
+    "✅ The following Istio control plane revisions/versions were found in the cluster:",
+    "Revision default:",
+    "unable to retrieve Pods: the server was unable to return a response in the time allotted",
+    "",
+    "✅ The following proxy revisions/versions were found in the cluster:",
+    "",
+  ].join("\n");
 }
 
 export function envoyFilter(namespace: string, name: string, spec: Obj): Obj {

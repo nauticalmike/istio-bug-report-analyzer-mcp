@@ -10,10 +10,10 @@ import { demoProfileEvidence, riskyEnvoyFilters, singleReplicaIstiods, type Issu
 // Sources that compute a list of issues: the signal value is the list (null when empty)
 // and each issue's detail is reported as an affected resource.
 const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportStore, source: Signal["source"]) => Issue[]>> = {
-  version_skew: (store) => findVersionSkew(store.getVersions()),
+  version_skew: (store) => findVersionSkew(store.getEffectiveVersions()),
   version_support: (store, source) =>
     source.type === "version_support"
-      ? findUnsupportedVersions(store.getVersions(), source.supported ?? [], source.supportedSolo)
+      ? findUnsupportedVersions(store.getEffectiveVersions(), source.supported ?? [], source.supportedSolo)
       : [],
   envoyfilter_risks: (store) => riskyEnvoyFilters(store),
   demo_profile: (store) => demoProfileEvidence(store),
@@ -112,7 +112,7 @@ export class DiagnosticEngine {
         return results.length > 0 ? results : null;
       }
       case "version": {
-        return store.getVersions();
+        return store.getEffectiveVersions();
       }
       case "resource": {
         const resources = store.getClusterResources({ kind: source.kind });

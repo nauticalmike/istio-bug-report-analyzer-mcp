@@ -1,4 +1,4 @@
-import type { VersionInfo } from "../types.js";
+import type { ComponentVersion, VersionInfo } from "../types.js";
 
 export interface Minor {
   major: number;
@@ -23,8 +23,11 @@ function distance(a: Minor, b: Minor): number {
   return (a.major - b.major) * 1000 + (a.minor - b.minor);
 }
 
+const FROM_IMAGES = " [versions from pod image tags]";
+
 // Istio allows the control plane to be one minor ahead of the data plane, never behind.
 // A proxy matching any control plane revision's minor is not skewed (canary upgrades).
+// ztunnel and istio-cni follow the same rule against istiod.
 export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
   if (!versions) return [];
   const cpMinors = versions.controlPlaneVersions
@@ -32,25 +35,34 @@ export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
     .filter((m): m is Minor => m !== null);
   if (cpMinors.length === 0) return [];
 
-  const issues: VersionIssue[] = [];
-  for (const proxy of versions.proxyVersions) {
-    const dp = parseMinor(proxy.version);
-    if (!dp) continue;
-    const gaps = cpMinors.map((cp) => distance(cp, dp));
-    if (gaps.includes(0)) continue;
+  const proxiesFromImages = versions.fromImages?.controlPlane || versions.fromImages?.proxies;
+  const groups: { prefix: string; unit: [string, string]; list: ComponentVersion[]; note: string }[] = [
+    { prefix: "", unit: ["proxy", "proxies"], list: versions.proxyVersions, note: proxiesFromImages ? FROM_IMAGES : "" },
+    { prefix: "ztunnel: ", unit: ["pod", "pods"], list: versions.ztunnelVersions ?? [], note: FROM_IMAGES },
+    { prefix: "istio-cni: ", unit: ["pod", "pods"], list: versions.cniVersions ?? [], note: FROM_IMAGES },
+  ];
 
-    const closest = gaps.reduce((best, g) =>
-      Math.abs(g) < Math.abs(best) || (Math.abs(g) === Math.abs(best) && g > 0) ? g : best,
-    );
-    const cp = cpMinors[gaps.indexOf(closest)];
-    const proxies = proxy.count > 0 ? `${proxy.count} prox${proxy.count === 1 ? "y" : "ies"}` : "proxies";
-    const subject = `${proxies} on ${proxy.version}, control plane ${label(cp)}`;
-    if (closest < 0) {
-      issues.push({ kind: "data-plane-ahead", detail: `${subject}: data plane is ahead of the control plane (unsupported)` });
-    } else if (closest > 1) {
-      issues.push({ kind: "unsupported-skew", detail: `${subject}: ${closest} minors behind (only 1 is supported)` });
-    } else {
-      issues.push({ kind: "data-plane-behind", detail: `${subject}: 1 minor behind (supported, upgrade proxies)` });
+  const issues: VersionIssue[] = [];
+  for (const { prefix, unit, list, note } of groups) {
+    for (const component of list) {
+      const dp = parseMinor(component.version);
+      if (!dp) continue;
+      const gaps = cpMinors.map((cp) => distance(cp, dp));
+      if (gaps.includes(0)) continue;
+
+      const closest = gaps.reduce((best, g) =>
+        Math.abs(g) < Math.abs(best) || (Math.abs(g) === Math.abs(best) && g > 0) ? g : best,
+      );
+      const cp = cpMinors[gaps.indexOf(closest)];
+      const who = component.count > 0 ? `${component.count} ${component.count === 1 ? unit[0] : unit[1]}` : unit[1];
+      const subject = `${prefix}${who} on ${component.version}, control plane ${label(cp)}`;
+      if (closest < 0) {
+        issues.push({ kind: "data-plane-ahead", detail: `${subject}: data plane is ahead of the control plane (unsupported)${note}` });
+      } else if (closest > 1) {
+        issues.push({ kind: "unsupported-skew", detail: `${subject}: ${closest} minors behind (only 1 is supported)${note}` });
+      } else {
+        issues.push({ kind: "data-plane-behind", detail: `${subject}: 1 minor behind (supported, upgrade ${unit[1] === "proxies" ? "proxies" : "it"})${note}` });
+      }
     }
   }
   return issues;

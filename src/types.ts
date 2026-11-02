@@ -15,7 +15,19 @@ export interface VersionInfo {
   raw: string;
   clientVersion: string | null;
   controlPlaneVersions: { revision: string; version: string }[];
-  proxyVersions: { version: string; count: number }[];
+  proxyVersions: ComponentVersion[];
+  /** From ztunnel pod image tags (the versions file does not list ztunnel). */
+  ztunnelVersions?: ComponentVersion[];
+  /** From istio-cni (install-cni) pod image tags. */
+  cniVersions?: ComponentVersion[];
+  /** Which lists were filled from pod image tags because the versions file had none. */
+  fromImages?: { controlPlane: boolean; proxies: boolean };
+}
+
+/** A version and how many pods run it (0 when the source does not record counts). */
+export interface ComponentVersion {
+  version: string;
+  count: number;
 }
 
 export interface ClusterInfo {

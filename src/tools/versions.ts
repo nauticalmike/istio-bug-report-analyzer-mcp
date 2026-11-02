@@ -1,7 +1,7 @@
 import type { BugReportStore } from "../archive/store.js";
 
 export function getVersions(store: BugReportStore) {
-  const versions = store.getVersions();
+  const versions = store.getEffectiveVersions();
   if (!versions) {
     return { content: [{ type: "text" as const, text: "No version information available." }] };
   }
