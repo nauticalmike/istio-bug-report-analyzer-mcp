@@ -89,11 +89,16 @@ the npm package (`istio-bug-report-analyzer-mcp`).
   proxy dir) and lists the rest in its details (StatefulSet, Job, Argo Rollout, bare and
   system-namespace pods; Pending pods). Coverage is given per role: `sidecars a/b,
   gateways c/d, waypoints e/f, ztunnel g/h` (an east-west gateway on the ztunnel image is a
-  gateway). It is a major gap only when the primary data plane (sidecars when the mesh has
-  any, else ztunnel) is under half covered and the shortfall has no scope. A
+  gateway). It is a major gap only when the data plane (sidecars when the mesh has any,
+  ztunnel when it has any) is under half covered and the shortfall has no scope. A
   namespace-scoped collection (the namespaces with proxy dirs at least 80% covered, others
-  none: `--include` or a collector that targets namespaces), a gateway-only collection, or
-  a gateway/waypoint shortfall is a minor gap whose summary names the scope. No proxy dirs
+  none, a namespace each way with 3 or more proxy pods, and that all-or-nothing shape under
+  1% likely by random per-pod loss; no exec/port-forward/forbidden errors in
+  `bug-report.log` for the missing pods or namespaces), a gateway-only collection, or a
+  gateway/waypoint shortfall is a minor gap whose summary names the scope. A shortfall
+  spread across namespaces, including random loss over namespaces of one or two pods,
+  stays major. A dump in which no pod has `ownerReferences` has unknown owners: every pod
+  counts as collectable instead of bare. No proxy dirs
   at all is a major gap that says nothing was collected (not a "sample"). A pod list from
   `cluster/pods` alone, with proxy dirs outside its namespaces, is "not evaluated".
 - **A pod dump the item scan gives up on is reported.** A dump the scanner does not model

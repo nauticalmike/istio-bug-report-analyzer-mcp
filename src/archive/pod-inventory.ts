@@ -50,6 +50,11 @@ export interface PodInventory {
   kept: ParsedResource[];
   /** Owner kind of each ReplicaSet in the dumps by "namespace/name" ("" when it has none). */
   rsOwners: Map<string, string>;
+  /**
+   * True when any Pod in the dumps has ownerReferences. When none has, the dump was written
+   * without them (a filtered export), so a pod's owner is unknown rather than absent.
+   */
+  podOwnersKnown: boolean;
 }
 
 /** Namespaces istioctl bug-report always skips (inject.IgnoredNamespaces). */
@@ -60,10 +65,12 @@ export const IGNORED_NAMESPACES = new Set(["kube-system", "kube-public", "kube-n
  * by a Deployment (through a ReplicaSet) or a DaemonSet, outside the namespaces Istio injection
  * ignores (tools/bug-report/pkg/cluster/cluster.go, GetClusterResources). StatefulSet, Job,
  * CronJob and Argo Rollout pods (a ReplicaSet whose owner is not a Deployment) and bare pods
- * never get a proxy dir. A ReplicaSet that was not dumped counts as Deployment-owned.
+ * never get a proxy dir. A ReplicaSet that was not dumped counts as Deployment-owned, and a
+ * pod without ownerReferences in a dump where no pod has any (owners unknown) is collectable.
  */
 export function collectableByIstioctl(p: PodRecord, inv: PodInventory): boolean {
   if (IGNORED_NAMESPACES.has(p.namespace)) return false;
+  if (p.ownerKind === null && !inv.podOwnersKnown) return true;
   if (p.ownerKind === "DaemonSet") return true;
   if (p.ownerKind === "ReplicaSet" && p.ownerName) {
     const owner = inv.rsOwners.get(podKey(p.namespace, p.ownerName));
@@ -295,7 +302,7 @@ function summarizeObject(r: ParsedResource): ItemSummary {
  * path to its absolute path; `wholeCluster` is set when cluster/k8s-resources gave an object.
  */
 export function scanPodInventory(files: { relativePath: string; absolutePath: string }[], opts: PodScanOptions = {}): PodInventory {
-  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false, gaveUp: [], kept: [], rsOwners: new Map() };
+  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false, gaveUp: [], kept: [], rsOwners: new Map(), podOwnersKnown: false };
   for (const file of files) {
     let objects = 0;
     const add = (s: ItemSummary) => {
@@ -305,6 +312,7 @@ export function scanPodInventory(files: { relativePath: string; absolutePath: st
       if (s.kind === "ReplicaSet" && s.name) inventory.rsOwners.set(podKey(s.namespace ?? "default", s.name), s.ownerKind ?? "");
       if (s.pod) {
         inventory.available = true;
+        if (s.pod.ownerKind !== null) inventory.podOwnersKnown = true;
         const key = podKey(s.pod.namespace, s.pod.name);
         if (!inventory.pods.has(key)) inventory.pods.set(key, s.pod);
       }

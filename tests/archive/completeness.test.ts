@@ -599,8 +599,7 @@ describe("proxy-coverage signal", () => {
     expect(s.summary).toMatch(/^1 of 4 proxy pods .*\(waypoints 0\/1, ztunnel 1\/3\)/);
   });
 
-  async function threeNamespaces(covered: [number, number, number]) {
-    const sizes = [3, 5, 4];
+  async function threeNamespaces(covered: [number, number, number], sizes: [number, number, number] = [5, 5, 4]) {
     const items: Obj[] = [];
     for (const [i, ns] of ["a", "b", "c"].entries()) {
       const ns_names = names(`app${ns}`, sizes[i]);
@@ -611,11 +610,11 @@ describe("proxy-coverage signal", () => {
   }
 
   it("calls a namespace-scoped collection a minor gap with scope wording (Fix E)", async () => {
-    await threeNamespaces([3, 0, 0]);
+    await threeNamespaces([5, 0, 0]);
     const s = await signal();
     expect(s.status).toBe("gap");
     expect(s.minor).toBe(true);
-    expect(s.summary).toMatch(/proxy dirs cover 1 of 3 namespaces with proxy pods \(3 of 12 pods, 100% within those namespaces\): a namespace-scoped collection/);
+    expect(s.summary).toMatch(/proxy dirs cover 1 of 3 namespaces with proxy pods \(5 of 14 pods, 100% within those namespaces\): a namespace-scoped collection/);
     expect(s.details.join("\n")).toMatch(/2 namespaces with proxy pods have no proxy dir: b, c/);
     expect(s.summary).not.toMatch(/sample/);
   });
@@ -625,7 +624,102 @@ describe("proxy-coverage signal", () => {
     const s = await signal();
     expect(s.status).toBe("gap");
     expect(s.minor).toBeUndefined();
-    expect(s.summary).toMatch(/^3 of 12 proxy pods/);
+    expect(s.summary).toMatch(/^3 of 14 proxy pods/);
+  });
+
+  it("does not call all-or-nothing namespaces scoped when that is likely by chance (12 pods, 1 of 3 namespaces)", async () => {
+    // p = 3/12: every namespace being all-or-nothing by chance is ~3%, above the 1% cut.
+    await threeNamespaces([3, 0, 0], [3, 5, 4]);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/spread across namespaces/);
+  });
+
+  it("keeps random loss across one-pod namespaces major (no namespace with 3 or more pods)", async () => {
+    const items: Obj[] = [];
+    for (let i = 0; i < 20; i++) {
+      const [n] = names(`app${i}`, 1);
+      items.push(pod(`ns${i}`, n));
+      if (i % 10 < 3) await addDir(`ns${i}`, n);
+    }
+    await writeDump(items);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^6 of 20 proxy pods/);
+  });
+
+  it("keeps random loss across two-pod namespaces major", async () => {
+    const items: Obj[] = [];
+    for (let i = 0; i < 30; i++) {
+      const ns = names(`app${i}`, 2);
+      items.push(...ns.map((n) => pod(`ns${i}`, n)));
+      if (i < 9) for (const n of ns) await addDir(`ns${i}`, n);
+    }
+    await writeDump(items);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+  });
+
+  it("does not call a shortfall scoped when bug-report.log has exec errors for the namespaces without dirs", async () => {
+    await threeNamespaces([5, 0, 0]);
+    await writeFile(
+      join(dir, "bug-report.log"),
+      "2026-03-18T10:00:00.000Z\terror\tfailed to exec into pod b/appb-0-7d9f8b6c4d-x2k9p: error dialing backend: forbidden\n",
+    );
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.details.join("\n")).toMatch(/bug-report\.log has exec\/port-forward\/forbidden errors for pods or namespaces without a proxy dir/);
+  });
+
+  it("keeps a namespace-scoped shortfall minor when bug-report.log errors are only for collected namespaces", async () => {
+    await threeNamespaces([5, 0, 0]);
+    await writeFile(join(dir, "bug-report.log"), "2026-03-18T10:00:00.000Z\terror\tport-forward failed for pod a/appa-0-7d9f8b6c4d-x2k9p\n");
+    const s = await signal();
+    expect(s.minor).toBe(true);
+  });
+
+  it("treats owners as unknown (collectable) when no pod in the dump has ownerReferences", async () => {
+    const items: Obj[] = [];
+    for (const [i, n] of names("app", 10).entries()) {
+      const p = pod("shop", n) as { metadata: Obj };
+      delete p.metadata.ownerReferences;
+      items.push(p);
+      if (i < 2) await addDir("shop", n);
+    }
+    await writeDump(items);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^2 of 10 proxy pods/);
+    expect(s.details.join("\n")).not.toMatch(/never collects/);
+    expect(s.details.join("\n")).toMatch(/no pod in the dump has ownerReferences/);
+  });
+
+  it("still calls a pod without ownerReferences bare when other pods in the dump have owners", async () => {
+    const [a, b] = names("app", 2);
+    const bare = pod("shop", b) as { metadata: Obj };
+    delete bare.metadata.ownerReferences;
+    await writeDump([pod("shop", a), bare]);
+    await addDir("shop", a);
+    const s = await signal();
+    expect(s.status).toBe("ok");
+    expect(s.details).toContain("1 injected pod istioctl bug-report never collects (StatefulSet/Job/Rollout/bare pod or system namespace)");
+  });
+
+  it("is a major gap when ztunnel is mostly uncovered even though the few sidecars are covered", async () => {
+    const sidecars = names("app", 2);
+    const zt = Array.from({ length: 10 }, (_, i) => `ztunnel-${"bcdfghjklm"[i]}x2k9`);
+    await writeDump([...sidecars.map((n) => pod("shop", n)), ...zt.map((n) => pod("istio-system", n, "ztunnel"))]);
+    for (const n of sidecars) await addDir("shop", n);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/sidecars 2\/2, ztunnel 0\/10/);
+    expect(s.summary).toMatch(/most ztunnel/);
   });
 
   it("calls a gateway-only collection a minor gap with scope wording (Fix E)", async () => {

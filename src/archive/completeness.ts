@@ -72,8 +72,14 @@ const MAJOR_DAEMON_LOG_SHARE = 0.25;
 const MAJOR_CLIENT_MINORS_BEHIND = 2;
 // Proxy coverage: below this share of the primary data plane's pods with a proxy dir, the gap is major.
 const MIN_PROXY_COVERAGE = 0.5;
-// A shortfall is namespace-scoped when the namespaces that have dirs are covered at least this well.
+// A shortfall is namespace-scoped when the namespaces that have dirs are covered at least this well,
 const MIN_SCOPED_NAMESPACE_COVERAGE = 0.8;
+// random per-pod loss would leave every namespace all-or-nothing with less than this probability,
+const MAX_SCOPE_BY_CHANCE = 0.01;
+// and a namespace with dirs and one without each have at least this many proxy pods.
+const MIN_SCOPE_NAMESPACE_PODS = 3;
+// bug-report.log errors that lose a pod's data (exec, port-forward, RBAC), not a namespace's scope.
+const POD_COLLECTION_ERROR_RE = /\bexec\b|port-?forward|\bforbidden\b/i;
 // Collection spans shorter than this are normal and not reported.
 const MIN_REPORTED_SPAN_MS = 10 * 60 * 1000;
 
@@ -368,6 +374,7 @@ function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): Complet
     else counted.push(p);
   }
   const details: string[] = [];
+  if (!pods.podOwnersKnown) details.push("no pod in the dump has ownerReferences, so owners are unknown: every Running proxy pod counts as one istioctl collects");
   if (neverCollected > 0) details.push(`${plural(neverCollected, "injected pod")} istioctl bug-report never collects (StatefulSet/Job/Rollout/bare pod or system namespace)`);
   if (notRunning > 0) details.push(`${plural(notRunning, "injected pod")} not Running (Pending/Unknown)`);
   if (counted.length === 0) return signal("proxy-coverage", "ok", "no proxy pods istioctl can collect in the pod dump", details);
@@ -408,19 +415,22 @@ function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): Complet
     ? `${covered} of ${plural(counted.length, "proxy pod")} in the pod dump have a proxy dir (${roleText})`
     : `${covered} of ${plural(counted.length, "proxy pod")} in the namespaces the pod dump covers (no cluster/k8s-resources) have a proxy dir (${roleText})`;
   const short = (r: RoleCoverage) => r.covered < MIN_PROXY_COVERAGE * r.total;
-  const primary = roles.find((r) => r.role === "sidecar") ?? roles.find((r) => r.role === "ztunnel");
+  // The data plane: sidecars and ztunnel, each wherever the mesh has any.
+  const primaries = roles.filter((r) => r.role === "sidecar" || r.role === "ztunnel");
+  const shortPrimaries = primaries.filter(short);
 
-  if (primary && short(primary)) {
-    const scoped = scopedCoverage(counted, roles, hasDir, roleText);
+  if (shortPrimaries.length > 0) {
+    const logErrors = collectionErrorsFor(store, counted.filter((p) => !hasDir(p)), new Set(counted.filter(hasDir).map((p) => p.namespace)));
+    const scoped = logErrors ? null : scopedCoverage(counted, roles, hasDir, roleText);
     if (scoped) return minorGap("proxy-coverage", scoped.summary(summary), [...scoped.details, ...details, ...withoutNote]);
     return gapOf(
       !pods.wholeCluster,
       "proxy-coverage",
-      `${summary}: proxy configs and logs are missing for most ${primary.label}, spread across namespaces (no namespace or gateway-only scope, e.g. a timed-out or failed collection), so proxy findings undercount`,
-      [...details, ...withoutNote],
+      `${summary}: proxy configs and logs are missing for most ${shortPrimaries.map((r) => r.label).join(" and ")}, spread across namespaces (no namespace or gateway-only scope, e.g. a timed-out or failed collection), so proxy findings undercount`,
+      [...(logErrors ? [logErrors] : []), ...details, ...withoutNote],
     );
   }
-  const shortRoles = roles.filter((r) => r !== primary && short(r));
+  const shortRoles = roles.filter((r) => !primaries.includes(r) && short(r));
   if (shortRoles.length > 0) {
     return minorGap(
       "proxy-coverage",
@@ -432,10 +442,39 @@ function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): Complet
 }
 
 /**
- * The scope of a collection that left the primary data plane short, or null when it has none:
- * gateway-only (every gateway covered, no other proxy), or namespace-scoped (the namespaces
- * with dirs covered to MIN_SCOPED_NAMESPACE_COVERAGE, at least one namespace with none). The
- * archive does not record istioctl's --include flags, so this is the shape, not a proof.
+ * A note when bug-report.log has exec, port-forward or forbidden errors that name a pod
+ * without a proxy dir or a namespace with none: those pods were tried and failed, so the
+ * shortfall is a failed collection, not a scoped one. Null when it has none.
+ */
+function collectionErrorsFor(store: BugReportStore, missing: PodRecord[], coveredNamespaces: Set<string>): string | null {
+  const scan = store.getCollectionScan();
+  if (!scan || scan.error || missing.length === 0) return null;
+  const names = new Set(missing.map((p) => p.name));
+  const namespaces = new Set(missing.map((p) => p.namespace).filter((ns) => !coveredNamespaces.has(ns)));
+  // Namespace names are DNS labels: "<ns>/<pod>", or after "namespace". Nothing to escape.
+  const nsRe = (ns: string) => new RegExp(`(?:^|[\\s"'(=])${ns}/|\\bnamespaces?[\\s=:"']+${ns}\\b`);
+  const nsTests = [...namespaces].map((ns) => ({ ns, re: nsRe(ns) }));
+  for (const issue of scan.issues) {
+    for (const text of [issue.message, ...(issue.details ?? [])]) {
+      if (!POD_COLLECTION_ERROR_RE.test(text)) continue;
+      const pod = text.match(/[a-z0-9][a-z0-9.-]*[a-z0-9]/g)?.find((t) => names.has(t));
+      const ns = pod ? undefined : nsTests.find(({ re }) => re.test(text))?.ns;
+      if (pod || ns) {
+        return `bug-report.log has exec/port-forward/forbidden errors for pods or namespaces without a proxy dir (${pod ?? `namespace ${ns}`}): a failed collection, not a scoped one: ${text.slice(0, 200)}`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The scope of a collection that left the data plane short, or null when it has none:
+ * gateway-only (every gateway covered, no other proxy), or namespace-scoped: the namespaces
+ * with dirs covered to MIN_SCOPED_NAMESPACE_COVERAGE, a namespace with dirs and one without
+ * each holding MIN_SCOPE_NAMESPACE_PODS pods or more, and random per-pod loss (p = the share
+ * covered) unlikely to make every namespace all-or-nothing: the product over namespaces of
+ * p^n + (1-p)^n below MAX_SCOPE_BY_CHANCE. The archive does not record istioctl's --include
+ * flags, so this is the shape, not a proof.
  */
 function scopedCoverage(
   counted: PodRecord[],
@@ -462,8 +501,14 @@ function scopedCoverage(
   const inTotal = withDirs.reduce((sum, [, n]) => sum + n.total, 0);
   const inCovered = withDirs.reduce((sum, [, n]) => sum + n.covered, 0);
   if (none.length === 0 || withDirs.length === 0 || inCovered < MIN_SCOPED_NAMESPACE_COVERAGE * inTotal) return null;
-  const pct = Math.round((100 * inCovered) / inTotal);
+  if (!withDirs.some(([, n]) => n.total >= MIN_SCOPE_NAMESPACE_PODS)) return null;
+  if (!none.some((ns) => byNs.get(ns)!.total >= MIN_SCOPE_NAMESPACE_PODS)) return null;
   const covered = counted.filter(hasDir).length;
+  const p = covered / counted.length;
+  let byChance = 1;
+  for (const [, n] of byNs) byChance *= p ** n.total + (1 - p) ** n.total;
+  if (byChance >= MAX_SCOPE_BY_CHANCE) return null;
+  const pct = Math.round((100 * inCovered) / inTotal);
   return {
     summary: () =>
       `proxy dirs cover ${withDirs.length} of ${plural(byNs.size, "namespace")} with proxy pods (${covered} of ${counted.length} pods, ${pct}% within those namespaces): ` +
