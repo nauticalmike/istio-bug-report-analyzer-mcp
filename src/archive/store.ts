@@ -223,7 +223,8 @@ export class BugReportStore {
 
   private async loadAll(): Promise<void> {
     // Small root files are parsed eagerly; their raw content is discarded.
-    const versionsContent = await this.readFileContent("versions");
+    // Some collection scripts name the file istio-versions.
+    const versionsContent = (await this.readFileContent("versions")) ?? (await this.readFileContent("istio-versions"));
     if (versionsContent) {
       this.versions = parseVersionsFile(versionsContent);
     }

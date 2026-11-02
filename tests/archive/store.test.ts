@@ -276,3 +276,19 @@ describe("BugReportStore cluster resource dedup", () => {
     expect(a).toEqual(syncStore.getClusterResources());
   });
 });
+
+describe("BugReportStore versions file name", () => {
+  it("reads istio-versions when the archive has no versions file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "store-istio-versions-"));
+    try {
+      await createMinimalArchive(dir);
+      const { rename } = await import("node:fs/promises");
+      await rename(join(dir, "versions"), join(dir, "istio-versions"));
+      const store = await BugReportStore.fromDirectory(dir);
+      expect(store.getVersions()?.controlPlaneVersions).toEqual([{ revision: "default", version: "1.31.2" }]);
+      expect(store.getCompletenessSignal("versions").status).toBe("ok");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
