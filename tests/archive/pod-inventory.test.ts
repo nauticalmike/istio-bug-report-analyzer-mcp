@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { dump } from "js-yaml";
-import { scanPodInventory } from "../../src/archive/pod-inventory.js";
+import { collectableByIstioctl, scanPodInventory } from "../../src/archive/pod-inventory.js";
 
 type Obj = Record<string, unknown>;
 
@@ -59,7 +59,7 @@ describe("scanPodInventory", () => {
         "shop/cart-7d9f8b6c4d-x2k9p",
         "web/plain-5b6c7d8f9g-h2j4k",
       ]);
-      expect(inv.pods.get("shop/cart-7d9f8b6c4d-x2k9p")).toEqual({ namespace: "shop", name: "cart-7d9f8b6c4d-x2k9p", phase: "Running", injected: true, daemon: null });
+      expect(inv.pods.get("shop/cart-7d9f8b6c4d-x2k9p")).toMatchObject({ namespace: "shop", name: "cart-7d9f8b6c4d-x2k9p", phase: "Running", injected: true, daemon: null });
       expect(inv.pods.get("shop/batch-job-q8z4w")?.phase).toBe("Succeeded");
       expect(inv.pods.get("istio-system/ztunnel-x7k2p")).toMatchObject({ injected: false, daemon: "ztunnel" });
       expect(inv.pods.get("kube-system/istio-cni-node-q9w8z")).toMatchObject({ injected: false, daemon: "cni" });
@@ -79,4 +79,68 @@ describe("scanPodInventory", () => {
     const inv = await scan(dump({ apiVersion: "v1", kind: "List", items: items.slice(5) }));
     expect(inv.available).toBe(false);
   });
+});
+
+const owned = (o: Obj, kind: string, name: string): Obj => ({ ...o, metadata: { ...(o.metadata as Obj), ownerReferences: [{ apiVersion: "apps/v1", kind, name, controller: true, uid: "u-1" }] } });
+const proxy = (args: string[], image = "docker.io/istio/proxyv2:1.31.2"): Obj[] => [{ name: "istio-proxy", image, args }];
+const replicaSet = (namespace: string, name: string, ownerKind: string): Obj =>
+  owned({ apiVersion: "apps/v1", kind: "ReplicaSet", metadata: { name, namespace } }, ownerKind, name.replace(/-[^-]+$/, ""));
+
+const roleItems: Obj[] = [
+  owned(pod("shop", "cart-7d9f8b6c4d-x2k9p", proxy(["proxy", "sidecar"])), "ReplicaSet", "cart-7d9f8b6c4d"),
+  owned(pod("istio-ingress", "istio-ingressgateway-5b6c7d8f9g-h2j4k", proxy(["proxy", "router"])), "ReplicaSet", "istio-ingressgateway-5b6c7d8f9g"),
+  owned(
+    { ...pod("shop", "waypoint-6c7d8f9b5d-q8z4w", proxy(["proxy", "router"])), metadata: { name: "waypoint-6c7d8f9b5d-q8z4w", namespace: "shop", labels: { "gateway.istio.io/managed": "istio.io-mesh-controller" } } },
+    "ReplicaSet",
+    "waypoint-6c7d8f9b5d",
+  ),
+  owned(pod("istio-system", "ztunnel-x7k2p", proxy(["proxy", "ztunnel"], "docker.io/istio/ztunnel:1.31.2")), "DaemonSet", "ztunnel"),
+  // An east-west gateway that runs the ztunnel image: istioctl collects it, so it is a gateway.
+  owned(pod("istio-eastwest", "istio-eastwest-7d9f8b6c4d-z9x8w", proxy([], "docker.io/istio/ztunnel:1.31.2")), "ReplicaSet", "istio-eastwest-7d9f8b6c4d"),
+  owned(pod("shop", "db-0", proxy(["proxy", "sidecar"])), "StatefulSet", "db"),
+  owned(pod("shop", "canary-5f6d7c8b9d-k2j4h", proxy(["proxy", "sidecar"])), "ReplicaSet", "canary-5f6d7c8b9d"),
+  owned(pod("kube-system", "dns-7d9f8b6c4d-m2n4p", proxy(["proxy", "sidecar"])), "ReplicaSet", "dns-7d9f8b6c4d"),
+  pod("shop", "bare", proxy(["proxy", "sidecar"])),
+  replicaSet("shop", "cart-7d9f8b6c4d", "Deployment"),
+  replicaSet("shop", "canary-5f6d7c8b9d", "Rollout"),
+];
+
+describe("scanPodInventory owners and proxy roles", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "pod-inventory-roles-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  for (const [format, content] of [
+    ["a YAML List (item scan)", () => dump({ apiVersion: "v1", kind: "List", items: roleItems })],
+    ["a JSON List (full-parse fallback)", () => JSON.stringify({ apiVersion: "v1", kind: "List", items: roleItems }, null, 2)],
+  ] as const) {
+    it(`reads owners, ReplicaSet owners and roles from ${format}`, async () => {
+      const absolutePath = join(dir, "dump");
+      await writeFile(absolutePath, content());
+      const inv = scanPodInventory([{ relativePath: "cluster/k8s-resources", absolutePath }]);
+      const get = (k: string) => inv.pods.get(k)!;
+      expect(get("shop/cart-7d9f8b6c4d-x2k9p")).toMatchObject({ ownerKind: "ReplicaSet", ownerName: "cart-7d9f8b6c4d", role: "sidecar" });
+      expect(get("istio-ingress/istio-ingressgateway-5b6c7d8f9g-h2j4k").role).toBe("gateway");
+      expect(get("shop/waypoint-6c7d8f9b5d-q8z4w").role).toBe("waypoint");
+      expect(get("istio-system/ztunnel-x7k2p")).toMatchObject({ ownerKind: "DaemonSet", role: "ztunnel", injected: false });
+      expect(get("istio-eastwest/istio-eastwest-7d9f8b6c4d-z9x8w").role).toBe("gateway");
+      expect(get("shop/bare")).toMatchObject({ ownerKind: null, ownerName: null });
+      expect(inv.rsOwners.get("shop/cart-7d9f8b6c4d")).toBe("Deployment");
+      expect(inv.rsOwners.get("shop/canary-5f6d7c8b9d")).toBe("Rollout");
+
+      const collectable = (k: string) => collectableByIstioctl(get(k), inv);
+      expect(collectable("shop/cart-7d9f8b6c4d-x2k9p")).toBe(true);
+      expect(collectable("istio-system/ztunnel-x7k2p")).toBe(true);
+      // A ReplicaSet that was not dumped counts as Deployment-owned (unknown is collectable).
+      expect(collectable("istio-ingress/istio-ingressgateway-5b6c7d8f9g-h2j4k")).toBe(true);
+      expect(collectable("shop/canary-5f6d7c8b9d-k2j4h")).toBe(false); // Argo Rollout
+      expect(collectable("shop/db-0")).toBe(false); // StatefulSet
+      expect(collectable("shop/bare")).toBe(false);
+      expect(collectable("kube-system/dns-7d9f8b6c4d-m2n4p")).toBe(false); // ignored namespace
+    });
+  }
 });

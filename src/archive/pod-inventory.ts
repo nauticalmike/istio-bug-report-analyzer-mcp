@@ -17,7 +17,17 @@ export interface PodRecord {
   injected: boolean;
   /** The ztunnel or istio-cni-node DaemonSet pod this is, by name. */
   daemon: "ztunnel" | "cni" | null;
+  /** Kind and name of the first metadata.ownerReferences entry; null for a bare pod. */
+  ownerKind: string | null;
+  ownerName: string | null;
+  /**
+   * The mesh proxy this pod runs, or null: an injected sidecar, a gateway (router; also an
+   * east-west gateway on the ztunnel image), a waypoint, or a ztunnel DaemonSet pod.
+   */
+  role: ProxyRole | null;
 }
+
+export type ProxyRole = "sidecar" | "gateway" | "waypoint" | "ztunnel";
 
 export interface PodInventory {
   /** False when no Pod was found in any pod dump: nothing can be compared. */
@@ -38,6 +48,28 @@ export interface PodInventory {
   gaveUp: string[];
   /** Parsed Pod items whose text passed the scan's `alsoKeep` test (none without one). */
   kept: ParsedResource[];
+  /** Owner kind of each ReplicaSet in the dumps by "namespace/name" ("" when it has none). */
+  rsOwners: Map<string, string>;
+}
+
+/** Namespaces istioctl bug-report always skips (inject.IgnoredNamespaces). */
+export const IGNORED_NAMESPACES = new Set(["kube-system", "kube-public", "kube-node-lease", "local-path-storage"]);
+
+/**
+ * Whether istioctl bug-report would collect this pod's proxy at all. It walks only pods owned
+ * by a Deployment (through a ReplicaSet) or a DaemonSet, outside the namespaces Istio injection
+ * ignores (tools/bug-report/pkg/cluster/cluster.go, GetClusterResources). StatefulSet, Job,
+ * CronJob and Argo Rollout pods (a ReplicaSet whose owner is not a Deployment) and bare pods
+ * never get a proxy dir. A ReplicaSet that was not dumped counts as Deployment-owned.
+ */
+export function collectableByIstioctl(p: PodRecord, inv: PodInventory): boolean {
+  if (IGNORED_NAMESPACES.has(p.namespace)) return false;
+  if (p.ownerKind === "DaemonSet") return true;
+  if (p.ownerKind === "ReplicaSet" && p.ownerName) {
+    const owner = inv.rsOwners.get(podKey(p.namespace, p.ownerName));
+    return owner === undefined || owner === "Deployment";
+  }
+  return false;
 }
 
 export interface PodScanOptions {
@@ -116,10 +148,57 @@ const ISTIO_PROXY_RE = /(?:^|[ \t-])name:[ \t]*["']?istio-proxy["']?[ \t]*\r?$/m
 const ZTUNNEL_ARG_RE = /^\s*- ["']?ztunnel["']?\s*$/m;
 const ZTUNNEL_IMAGE_RE = /image:\s*["']?[^\s"']*ztunnel[:@]/;
 
+const ROUTER_ARG_RE = /^\s*- ["']?router["']?\s*$/m;
+const WAYPOINT_ARG_RE = /^\s*- ["']?waypoint["']?\s*$/m;
+// Waypoint labels: the mesh controller's managed label, waypoint-for, or the istio-waypoint class.
+const WAYPOINT_LABEL_RE = /gateway\.istio\.io\/managed["']?:\s*["']?istio\.io-mesh-controller|istio\.io\/waypoint-for["']?:|gateway-class-name["']?:\s*["']?istio-waypoint\b/;
+
 interface ItemSummary {
   kind: string | null;
   namespace: string | null;
+  name?: string | null;
+  /** The first ownerReferences kind (ReplicaSets only). */
+  ownerKind?: string | null;
   pod?: PodRecord;
+}
+
+/** Kind and name of the first ownerReferences entry of a (dedented) metadata block. */
+function ownerOf(metadata: string): { kind: string | null; name: string | null } {
+  const m = /^( *)ownerReferences:[ \t]*\r?$/m.exec(metadata);
+  if (!m) return { kind: null, name: null };
+  let dash = -1;
+  let kind: string | null = null;
+  let name: string | null = null;
+  for (const raw of metadata.slice(m.index + m[0].length + 1).split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    const isDash = line.trimStart().startsWith("- ");
+    if (dash === -1) {
+      // kubectl writes the list at the key's indent or deeper; anything else ends the key.
+      if (!isDash || indent < m[1].length) break;
+      dash = indent;
+    } else if (indent <= dash) {
+      break; // the next entry, or the next metadata key
+    }
+    const field = /^\s*(?:- )?(kind|name):\s*(.*?)\s*$/.exec(line);
+    if (!field) continue;
+    const value = unquote(field[2].replace(/\s#.*$/, ""));
+    if (!value) continue;
+    if (field[1] === "kind") kind ??= own(value);
+    else name ??= own(value);
+  }
+  return { kind, name };
+}
+
+/** The role of a pod's istio-proxy, from its args and labels (as text or parsed). */
+function roleOf(o: { ztunnelDaemon: boolean; ztunnelImage: boolean; injected: boolean; router: boolean; waypoint: boolean }): ProxyRole | null {
+  if (o.ztunnelDaemon) return "ztunnel";
+  // A ztunnel-image proxy that is not the ztunnel DaemonSet: an ambient east-west gateway.
+  if (o.ztunnelImage) return "gateway";
+  if (!o.injected) return null;
+  if (o.waypoint) return "waypoint";
+  return o.router ? "gateway" : "sidecar";
 }
 
 /** Reads kind, namespace and (for a Pod) its record off a List item's YAML text, without parsing it. */
@@ -129,11 +208,27 @@ function summarizeText(text: string): ItemSummary {
   const kind = kindAt === -1 ? null : unquote(text.slice(kindAt + 5, kindEnd === -1 ? undefined : kindEnd).replace(/\s#.*$/, ""));
   const metadata = topBlock(text, "metadata");
   const namespace = blockScalar(metadata, "namespace");
+  if (kind === "ReplicaSet") {
+    return { kind, namespace, name: blockScalar(metadata, "name"), ownerKind: metadata.includes("ownerReferences") ? ownerOf(metadata).kind : null };
+  }
   if (kind !== "Pod") return { kind, namespace };
   const name = blockScalar(metadata, "name");
   if (!name) return { kind, namespace };
   // The substring checks first: the regexes cost a scan of every line of every pod.
+  const hasProxy = text.includes("istio-proxy") && ISTIO_PROXY_RE.test(text);
   const ztunnel = text.includes("ztunnel") && (ZTUNNEL_ARG_RE.test(text) || ZTUNNEL_IMAGE_RE.test(text));
+  const daemon = daemonKind(name);
+  const injected = hasProxy && !ztunnel && !daemon;
+  const owner = metadata.includes("ownerReferences") ? ownerOf(metadata) : { kind: null, name: null };
+  const ztunnelArg = ztunnel && ZTUNNEL_ARG_RE.test(text);
+  const role = roleOf({
+    // A ztunnel DaemonSet pod whose name is not the generated one still runs the ztunnel data plane.
+    ztunnelDaemon: daemon === "ztunnel" || (ztunnelArg && owner.kind === "DaemonSet"),
+    ztunnelImage: hasProxy && ztunnel && !daemon && !ztunnelArg,
+    injected,
+    router: injected && text.includes("router") && ROUTER_ARG_RE.test(text),
+    waypoint: injected && ((text.includes("waypoint") && WAYPOINT_ARG_RE.test(text)) || WAYPOINT_LABEL_RE.test(metadata)),
+  });
   return {
     kind,
     namespace,
@@ -141,8 +236,11 @@ function summarizeText(text: string): ItemSummary {
       namespace: namespace ?? "default",
       name,
       phase: blockScalar(topBlock(text, "status"), "phase"),
-      injected: text.includes("istio-proxy") && ISTIO_PROXY_RE.test(text) && !ztunnel && !daemonKind(name),
-      daemon: daemonKind(name),
+      injected,
+      daemon,
+      ownerKind: owner.kind,
+      ownerName: owner.name,
+      role,
     },
   };
 }
@@ -154,13 +252,27 @@ function summarizeObject(r: ParsedResource): ItemSummary {
   const kind = typeof r?.kind === "string" ? r.kind : null;
   const namespace = typeof r?.metadata?.namespace === "string" ? r.metadata.namespace : null;
   const name = r?.metadata?.name;
+  const refs = (r?.metadata as Obj | undefined)?.ownerReferences;
+  const first = (Array.isArray(refs) ? refs[0] : undefined) as Obj | undefined;
+  const ownerKind = typeof first?.kind === "string" ? first.kind : null;
+  const ownerName = typeof first?.name === "string" ? first.name : null;
+  if (kind === "ReplicaSet") return { kind, namespace, name: typeof name === "string" ? name : null, ownerKind };
   if (kind !== "Pod" || typeof name !== "string") return { kind, namespace };
   const spec = (r.spec ?? {}) as Obj;
   const containers = [spec.containers, spec.initContainers].flatMap((c) => (Array.isArray(c) ? c : [])) as Obj[];
   const proxy = containers.find((c) => c?.name === "istio-proxy");
   const args = Array.isArray(proxy?.args) ? proxy.args : [];
-  const ztunnel = args.includes("ztunnel") || (typeof proxy?.image === "string" && /ztunnel[:@]/.test(proxy.image));
+  const ztunnelImage = typeof proxy?.image === "string" && /ztunnel[:@]/.test(proxy.image);
+  const ztunnel = args.includes("ztunnel") || ztunnelImage;
   const phase = (r.status as Obj | undefined)?.phase;
+  const daemon = daemonKind(name);
+  const injected = !!proxy && !ztunnel && !daemon;
+  const labels = (r.metadata?.labels ?? {}) as Record<string, unknown>;
+  const waypoint =
+    labels["gateway.istio.io/managed"] === "istio.io-mesh-controller" ||
+    "istio.io/waypoint-for" in labels ||
+    labels["gateway.networking.k8s.io/gateway-class-name"] === "istio-waypoint" ||
+    args.includes("waypoint");
   return {
     kind,
     namespace,
@@ -168,8 +280,11 @@ function summarizeObject(r: ParsedResource): ItemSummary {
       namespace: namespace ?? "default",
       name,
       phase: typeof phase === "string" ? phase : null,
-      injected: !!proxy && !ztunnel && !daemonKind(name),
-      daemon: daemonKind(name),
+      injected,
+      daemon,
+      ownerKind,
+      ownerName,
+      role: roleOf({ ztunnelDaemon: daemon === "ztunnel" || (args.includes("ztunnel") && ownerKind === "DaemonSet"), ztunnelImage: !!proxy && ztunnelImage && !daemon && !args.includes("ztunnel"), injected, router: args.includes("router"), waypoint }),
     },
   };
 }
@@ -180,13 +295,14 @@ function summarizeObject(r: ParsedResource): ItemSummary {
  * path to its absolute path; `wholeCluster` is set when cluster/k8s-resources gave an object.
  */
 export function scanPodInventory(files: { relativePath: string; absolutePath: string }[], opts: PodScanOptions = {}): PodInventory {
-  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false, gaveUp: [], kept: [] };
+  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false, gaveUp: [], kept: [], rsOwners: new Map() };
   for (const file of files) {
     let objects = 0;
     const add = (s: ItemSummary) => {
       objects++;
       // Namespace objects are cluster-scoped: they say a namespace exists, not that its pods were dumped.
       if (s.namespace && s.kind !== "Namespace") inventory.namespaces.add(s.namespace);
+      if (s.kind === "ReplicaSet" && s.name) inventory.rsOwners.set(podKey(s.namespace ?? "default", s.name), s.ownerKind ?? "");
       if (s.pod) {
         inventory.available = true;
         const key = podKey(s.pod.namespace, s.pod.name);

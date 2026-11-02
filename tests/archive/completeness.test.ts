@@ -345,7 +345,7 @@ describe("three-level completeness verdict", () => {
   const load = () => BugReportStore.fromDirectory(dir);
   const signal = async (id: CompletenessSignalId) => (await load()).getCompletenessSignal(id);
   const podDoc = (namespace: string, name: string, proxy = true) =>
-    `---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ${name}\n  namespace: ${namespace}\nspec:\n  containers:\n    - name: app\n${proxy ? "    - name: istio-proxy\n      args:\n        - proxy\n        - sidecar\n" : ""}`;
+    `---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ${name}\n  namespace: ${namespace}\n  ownerReferences:\n  - apiVersion: apps/v1\n    kind: ReplicaSet\n    name: ${name.replace(/-[^-]+$/, "")}\nspec:\n  containers:\n    - name: app\n${proxy ? "    - name: istio-proxy\n      args:\n        - proxy\n        - sidecar\n" : ""}status:\n  phase: Running\n`;
   /** n injected pods in the dump, the first `withDirs` of them with a proxy dir (config_dump unless noDump). */
   const sidecars = async (n: number, withDirs: number, noDump = 0) => {
     for (let i = 0; i < n; i++) {
@@ -462,7 +462,8 @@ describe("three-level completeness verdict", () => {
     const s = await signal("proxy-coverage");
     expect(s.status).toBe("gap");
     expect(s.minor).toBeUndefined();
-    expect(s.summary).toMatch(/^4 of 10 injected pods in the pod dump have a proxy dir/);
+    expect(s.summary).toMatch(/^4 of 10 proxy pods in the pod dump have a proxy dir \(sidecars 4\/10\)/);
+    expect(s.summary).not.toMatch(/sample/);
   });
 
   it("keeps the structured API: every signal has an id, a status and details", async () => {
@@ -472,5 +473,169 @@ describe("three-level completeness verdict", () => {
       expect(["ok", "gap", "not_evaluated"]).toContain(s.status);
       expect(Array.isArray(s.details)).toBe(true);
     }
+  });
+});
+
+describe("proxy-coverage signal", () => {
+  type Obj = Record<string, unknown>;
+  let tempDir: string;
+  let dir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "proxy-coverage-"));
+    dir = join(tempDir, "bug-report");
+    await createMinimalArchive(dir);
+    // Only istiod in cluster/pods and no proxy dirs: each test adds its own.
+    await writeFile(join(dir, "cluster", "pods"), "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\nspec:\n  containers:\n    - name: discovery\n");
+    await rm(join(dir, "proxies"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const signal = async () => (await BugReportStore.fromDirectory(dir)).getCompletenessSignal("proxy-coverage");
+  const owner = (kind: string, name: string) => [{ apiVersion: "apps/v1", kind, name, controller: true }];
+  const rsOf = (name: string) => name.split("-").slice(0, -1).join("-");
+  type Role = "sidecar" | "gateway" | "waypoint" | "ztunnel";
+  /** A pod of the given role; owned by a ReplicaSet named after it unless `ownerKind` says otherwise. */
+  const pod = (namespace: string, name: string, role: Role = "sidecar", opts: { ownerKind?: string; phase?: string } = {}): Obj => {
+    const ownerKind = opts.ownerKind ?? (role === "ztunnel" ? "DaemonSet" : "ReplicaSet");
+    const labels = role === "waypoint" ? { "gateway.istio.io/managed": "istio.io-mesh-controller" } : { app: name };
+    const args = role === "sidecar" ? ["proxy", "sidecar"] : role === "ztunnel" ? ["proxy", "ztunnel"] : ["proxy", "router"];
+    const image = role === "ztunnel" ? "docker.io/istio/ztunnel:1.31.2" : "docker.io/istio/proxyv2:1.31.2";
+    return {
+      apiVersion: "v1",
+      kind: "Pod",
+      metadata: { name, namespace, labels, ownerReferences: owner(ownerKind, ownerKind === "ReplicaSet" ? rsOf(name) : name.replace(/-\d+$/, "")) },
+      spec: { containers: [...(role === "sidecar" ? [{ name: "app" }] : []), { name: "istio-proxy", image, args }] },
+      status: { phase: opts.phase ?? "Running" },
+    };
+  };
+  const replicaSet = (namespace: string, name: string, ownerKind: string): Obj => ({
+    apiVersion: "apps/v1",
+    kind: "ReplicaSet",
+    metadata: { name, namespace, ownerReferences: owner(ownerKind, name.replace(/-[^-]+$/, "")) },
+  });
+  const writeDump = (items: Obj[]) => writeFile(join(dir, "cluster", "k8s-resources"), dump({ apiVersion: "v1", kind: "List", items }));
+  const addDir = async (namespace: string, name: string) => {
+    const d = join(dir, "proxies", namespace, name);
+    await mkdir(d, { recursive: true });
+    await writeFile(join(d, "config_dump"), "{}");
+  };
+  const names = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}-${i}-7d9f8b6c4d-x2k9p`);
+
+  /** Fix A: 4 Deployment pods with dirs, plus pods istioctl never collects or that are not Running. */
+  async function fixA(withReplicaSets: boolean) {
+    const deployed = names("app", 4);
+    const rollout = Array.from({ length: 6 }, (_, i) => `canary-5f6d7c8b9d-k${"bcdfgh"[i]}2j4`);
+    await writeDump([
+      ...deployed.map((n) => pod("shop", n)),
+      ...rollout.map((n) => pod("shop", n)),
+      pod("shop", "db-0", "sidecar", { ownerKind: "StatefulSet" }),
+      pod("kube-system", "dns-7d9f8b6c4d-m2n4p"),
+      pod("shop", "late-7d9f8b6c4d-q8z4w", "sidecar", { phase: "Pending" }),
+      ...(withReplicaSets ? [replicaSet("shop", "app-0-7d9f8b6c4d", "Deployment"), replicaSet("shop", "canary-5f6d7c8b9d", "Rollout")] : []),
+    ]);
+    for (const n of deployed) await addDir("shop", n);
+  }
+
+  it("counts only Running pods istioctl bug-report can collect (Fix A)", async () => {
+    await fixA(true);
+    const s = await signal();
+    expect(s.status).toBe("ok");
+    expect(s.summary).toMatch(/^4 of 4 proxy pods/);
+    expect(s.details).toContain("8 injected pods istioctl bug-report never collects (StatefulSet/Job/Rollout/bare pod or system namespace)");
+    expect(s.details).toContain("1 injected pod not Running (Pending/Unknown)");
+  });
+
+  it("counts Rollout pods again when their ReplicaSet was not dumped (unknown owner is collectable)", async () => {
+    await fixA(false);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^4 of 10 proxy pods/);
+  });
+
+  it("is not evaluated when the pod dump (cluster/pods only) does not cover the proxy dirs' namespaces (Fix B)", async () => {
+    await rm(join(dir, "cluster", "k8s-resources"));
+    const gateways = ["istio-ingressgateway-5b6c7d8f9g-h2j4k", "istio-ingressgateway-5b6c7d8f9g-q8z4w", "istio-eastwestgateway-6c7d8f9b5d-x2k9p"];
+    await appendFile(join(dir, "cluster", "pods"), gateways.map((n) => `---\n${dump(pod("istio-system", n, "gateway"))}`).join(""));
+    for (const n of names("app", 10)) await addDir("shop", n);
+    const s = await signal();
+    expect(s.status).toBe("not_evaluated");
+    expect(s.summary).toMatch(/the pod dump covers only 1 namespace \(no cluster\/k8s-resources\); 10 of 10 proxy dirs are in namespaces it does not cover/);
+    expect(s.details.join("\n")).toMatch(/0 of 3 proxy pods in the namespaces the pod dump covers have a proxy dir/);
+    expect(`${s.summary}\n${s.details.join("\n")}`).not.toMatch(/sample/);
+  });
+
+  it("says no proxy dirs were collected when proxies/ is missing (Fix C)", async () => {
+    await writeDump(names("app", 5).map((n) => pod("shop", n)));
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^no proxy dirs \(proxies\/ missing\): proxy configs and logs were not collected for any of the 5 proxy pods/);
+    expect(s.summary).not.toMatch(/sample/);
+  });
+
+  const ztunnels = ["ztunnel-bc2d4", "ztunnel-x7k2p", "ztunnel-q9w8z"];
+  async function ambient(ztunnelDirs: number) {
+    await writeDump([...ztunnels.map((n) => pod("istio-system", n, "ztunnel")), pod("shop", "waypoint-6c7d8f9b5d-q8z4w", "waypoint")]);
+    for (const n of ztunnels.slice(0, ztunnelDirs)) await addDir("istio-system", n);
+  }
+
+  it("counts ztunnel as the ambient data plane: a waypoint-only shortfall is minor (Fix D)", async () => {
+    await ambient(3);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBe(true);
+    expect(s.summary).toMatch(/waypoints 0\/1, ztunnel 3\/3/);
+  });
+
+  it("is a major gap when the ztunnel data plane itself is not covered", async () => {
+    await ambient(1);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^1 of 4 proxy pods .*\(waypoints 0\/1, ztunnel 1\/3\)/);
+  });
+
+  async function threeNamespaces(covered: [number, number, number]) {
+    const sizes = [3, 5, 4];
+    const items: Obj[] = [];
+    for (const [i, ns] of ["a", "b", "c"].entries()) {
+      const ns_names = names(`app${ns}`, sizes[i]);
+      items.push(...ns_names.map((n) => pod(ns, n)));
+      for (const n of ns_names.slice(0, covered[i])) await addDir(ns, n);
+    }
+    await writeDump(items);
+  }
+
+  it("calls a namespace-scoped collection a minor gap with scope wording (Fix E)", async () => {
+    await threeNamespaces([3, 0, 0]);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBe(true);
+    expect(s.summary).toMatch(/proxy dirs cover 1 of 3 namespaces with proxy pods \(3 of 12 pods, 100% within those namespaces\): a namespace-scoped collection/);
+    expect(s.details.join("\n")).toMatch(/2 namespaces with proxy pods have no proxy dir: b, c/);
+    expect(s.summary).not.toMatch(/sample/);
+  });
+
+  it("keeps a shortfall spread across namespaces major", async () => {
+    await threeNamespaces([1, 1, 1]);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBeUndefined();
+    expect(s.summary).toMatch(/^3 of 12 proxy pods/);
+  });
+
+  it("calls a gateway-only collection a minor gap with scope wording (Fix E)", async () => {
+    const gws = ["istio-ingressgateway-5b6c7d8f9g-h2j4k", "istio-ingressgateway-5b6c7d8f9g-q8z4w"];
+    await writeDump([...gws.map((n) => pod("istio-system", n, "gateway")), ...names("app", 10).map((n) => pod("istio-system", n))]);
+    for (const n of gws) await addDir("istio-system", n);
+    const s = await signal();
+    expect(s.status).toBe("gap");
+    expect(s.minor).toBe(true);
+    expect(s.summary).toMatch(/only gateway proxies were collected/);
+    expect(s.summary).toMatch(/sidecars 0\/10, gateways 2\/2/);
   });
 });
