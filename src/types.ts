@@ -16,6 +16,8 @@ export interface VersionInfo {
   clientVersion: string | null;
   controlPlaneVersions: { revision: string; version: string }[];
   proxyVersions: ComponentVersion[];
+  /** Control plane revisions for which istioctl wrote an error instead of a MeshInfo. */
+  controlPlaneErrors?: { revision: string; message: string }[];
   /** From ztunnel pod image tags (the versions file does not list ztunnel). */
   ztunnelVersions?: ComponentVersion[];
   /** From istio-cni (install-cni) pod image tags. */

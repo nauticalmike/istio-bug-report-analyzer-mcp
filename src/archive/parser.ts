@@ -139,6 +139,14 @@ function parseBugReportVersions(content: string, result: VersionInfo): void {
         continue;
       }
       if (cpRevision === null) continue;
+      // istioctl writes the error in place of the MeshInfo, e.g. "no running Istio pods in
+      // namespace ..." for a revision label (often a tag) that no istiod carries.
+      if (line.trim() && !/BuildInfo\{|MeshInfo|ServerInfo/.test(line)) {
+        const rev = cpRevision;
+        const errors = (result.controlPlaneErrors ??= []);
+        if (!errors.some((e) => e.revision === rev)) errors.push({ revision: rev, message: line.trim() });
+        continue;
+      }
       for (const m of line.matchAll(BUILD_INFO_VERSION_RE)) {
         const key = `${cpRevision}\u0000${m[1]}`;
         if (!m[1] || cpSeen.has(key)) continue;

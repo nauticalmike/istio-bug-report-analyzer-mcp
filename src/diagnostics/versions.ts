@@ -15,6 +15,25 @@ export function parseMinor(version: string | null | undefined): Minor | null {
   return match ? { major: Number(match[1]), minor: Number(match[2]) } : null;
 }
 
+/** The release part of a version ("1.31.2-solo", "1.31.2-distroless" -> "1.31.2"); the input when it has none. */
+export function releaseOf(version: string): string {
+  return /^\d+\.\d+(?:\.\d+)?/.exec(version)?.[0] ?? version;
+}
+
+/**
+ * The istioctl client minor is older than the newest control plane minor: the bug report
+ * may miss or misread what the newer control plane exposes. Null when not older or unknown.
+ */
+export function clientBehindControlPlane(versions: VersionInfo | null): { client: string; controlPlane: string } | null {
+  const client = parseMinor(versions?.clientVersion);
+  const newest = (versions?.controlPlaneVersions ?? [])
+    .map((v) => parseMinor(v.version))
+    .filter((m): m is Minor => m !== null)
+    .sort((a, b) => distance(b, a))[0];
+  if (!client || !newest || distance(newest, client) <= 0) return null;
+  return { client: versions!.clientVersion!, controlPlane: label(newest) };
+}
+
 function label(m: Minor): string {
   return `${m.major}.${m.minor}`;
 }
