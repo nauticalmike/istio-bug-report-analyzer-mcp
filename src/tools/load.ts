@@ -70,8 +70,12 @@ export async function loadBugReport(
     let archiveDir: string;
     let extractWarning: string | undefined;
 
+    // A directory inside one of our extractions (say, the previous report's root) is read by
+    // the new store too, so the extraction must outlive the store it was made for.
+    let heldExtraction: string | undefined;
     if (pathStat.isDirectory()) {
       archiveDir = path;
+      heldExtraction = await opts.tracker.containing(path);
     } else if (path.endsWith(".tar.gz") || path.endsWith(".tgz")) {
       const extraction = await extractWithChecks(path, resolve(extract_dir ?? tmpdir()), opts);
       if ("error" in extraction) return errorResult(extraction.error);
@@ -90,6 +94,7 @@ export async function loadBugReport(
     const previous = getStore();
     setStore(store);
     if (tempDir) opts.tracker.attach(store, tempDir);
+    if (heldExtraction) opts.tracker.attach(store, heldExtraction);
     tempDir = undefined;
     if (previous && previous !== store) await opts.tracker.release(previous);
 

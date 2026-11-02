@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,7 +9,9 @@ import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import {
   EXTRACT_DIR_PREFIX,
+  EXTRACT_MARKER_FILE,
   ExtractionTracker,
+  sweepStaleExtractions,
   checkFreeSpace,
   estimateExpandedSize,
   installExitCleanup,
@@ -93,6 +95,36 @@ describe("ExtractionTracker", () => {
     expect(existsSync(dir)).toBe(false);
   });
 
+  it("writes a marker with this process's pid into each dir it creates", async () => {
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(parent);
+    expect((await readFile(join(dir, EXTRACT_MARKER_FILE), "utf8")).trim()).toBe(String(process.pid));
+  });
+
+  it("keeps a dir that a second owner still reads after the first releases it", async () => {
+    const tracker = new ExtractionTracker();
+    const first = {};
+    const second = {};
+    const dir = await tracker.create(parent);
+    tracker.attach(first, dir);
+    tracker.attach(second, dir);
+    await tracker.release(first);
+    expect(existsSync(dir)).toBe(true);
+    expect(await tracker.remove(dir)).toBe(false); // still held
+    await tracker.release(second);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("finds the tracked dir that contains a path", async () => {
+    const tracker = new ExtractionTracker();
+    const dir = await tracker.create(parent);
+    await mkdir(join(dir, "bug-report"));
+    expect(await tracker.containing(join(dir, "bug-report"))).toBe(dir);
+    expect(await tracker.containing(dir)).toBe(dir);
+    expect(await tracker.containing(parent)).toBeUndefined();
+    expect(await tracker.containing(`${dir}-other`)).toBeUndefined();
+  });
+
   it("removeAllSync deletes every dir it still owns", async () => {
     const tracker = new ExtractionTracker();
     const a = await tracker.create(parent);
@@ -101,6 +133,52 @@ describe("ExtractionTracker", () => {
     expect(existsSync(a)).toBe(false);
     expect(existsSync(b)).toBe(false);
     expect(tracker.size).toBe(0);
+  });
+});
+
+describe("sweepStaleExtractions", () => {
+  let parent: string;
+  beforeEach(async () => { parent = await mkdtemp(join(tmpdir(), "sweep-test-")); });
+  afterEach(async () => { await rm(parent, { recursive: true, force: true }); });
+
+  const DEAD = 999_999_001;
+  const isAlive = (pid: number) => pid !== DEAD;
+
+  async function dirWith(name: string, marker?: string): Promise<string> {
+    const dir = join(parent, name);
+    await mkdir(join(dir, "bug-report"), { recursive: true });
+    await writeFile(join(dir, "bug-report", "versions"), "x");
+    if (marker !== undefined) await writeFile(join(dir, EXTRACT_MARKER_FILE), marker);
+    return dir;
+  }
+
+  it("deletes only our marked dirs whose creating process is gone", async () => {
+    const stale = await dirWith(`${EXTRACT_DIR_PREFIX}stale`, `${DEAD}\n`);
+    const live = await dirWith(`${EXTRACT_DIR_PREFIX}live`, `${process.pid}\n`);
+    const unmarked = await dirWith(`${EXTRACT_DIR_PREFIX}unmarked`);
+    const garbage = await dirWith(`${EXTRACT_DIR_PREFIX}garbage`, "not a pid");
+    const otherName = await dirWith("someone-elses-dir", `${DEAD}\n`);
+    const removed = await sweepStaleExtractions(parent, isAlive);
+    expect(removed).toEqual([stale]);
+    expect(existsSync(stale)).toBe(false);
+    for (const kept of [live, unmarked, garbage, otherName]) expect(existsSync(kept)).toBe(true);
+  });
+
+  it("never follows a symlink named like an extraction dir", async () => {
+    const target = await dirWith("target", `${DEAD}\n`);
+    await symlink(target, join(parent, `${EXTRACT_DIR_PREFIX}link`));
+    expect(await sweepStaleExtractions(parent, isAlive)).toEqual([]);
+    expect(existsSync(join(target, "bug-report", "versions"))).toBe(true);
+  });
+
+  it("treats this process as alive with the default liveness check", async () => {
+    const live = await dirWith(`${EXTRACT_DIR_PREFIX}self`, `${process.pid}\n`);
+    expect(await sweepStaleExtractions(parent)).toEqual([]);
+    expect(existsSync(live)).toBe(true);
+  });
+
+  it("returns nothing for a missing parent", async () => {
+    expect(await sweepStaleExtractions(join(parent, "missing"))).toEqual([]);
   });
 });
 

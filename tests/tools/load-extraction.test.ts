@@ -80,6 +80,32 @@ describe("loadBugReport extraction lifecycle", () => {
     expect(tracker.size).toBe(0);
   });
 
+  it("keeps the extraction when the next report loaded is a directory inside it", async () => {
+    const a = await makeTarball("a");
+    await load(a);
+    const [first] = await extracted();
+    const inner = join(extractParent, first, "bug-report");
+    expect((await load(inner)).isError).toBeUndefined();
+    expect(existsSync(join(inner, "versions"))).toBe(true);
+    expect(store!.getVersions()?.clientVersion).toBe("1.31.2");
+
+    // Released once the report reading it is replaced.
+    const userDir = join(tempDir, "user-dir");
+    await createMinimalArchive(userDir);
+    await load(userDir);
+    expect(await extracted()).toHaveLength(0);
+  });
+
+  it("does not list the ownership marker as a report file", async () => {
+    const src = join(tempDir, "flat-src");
+    await createMinimalArchive(src);
+    const flat = join(tempDir, "flat.tar.gz");
+    // istioctl 1.30+ layout: sections at the tar root, so the report root is the extraction dir.
+    await tar.create({ gzip: true, file: flat, cwd: src }, await readdir(src));
+    await load(flat);
+    expect(store!.getAllFiles().some((f) => f.includes("bug-report-analyzer"))).toBe(false);
+  });
+
   it("extracts inside extract_dir and leaves extract_dir itself in place on cleanup", async () => {
     const a = await makeTarball("a");
     await load(a);

@@ -1,9 +1,15 @@
 // Only node: imports, so the exit-cleanup path can be exercised in a child process from the .ts source.
 import { rmSync } from "node:fs";
-import { mkdtemp, open, rm, stat, statfs } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdtemp, open, readFile, readdir, realpath, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 
 export const EXTRACT_DIR_PREFIX = "bug-report-extract-";
+/**
+ * Written into every extraction dir with the creating process's pid, so a later server can
+ * tell its own leftovers (from a crash or SIGKILL) from anything else named like them.
+ * The archive index skips it.
+ */
+export const EXTRACT_MARKER_FILE = ".istio-bug-report-analyzer-owner";
 
 // Bug-report archives are mostly text and compress well; assume they expand at most this much.
 const MAX_EXPANSION_RATIO = 30;
@@ -102,20 +108,29 @@ type ExitTarget = Pick<NodeJS.EventEmitter, "on"> & { exit: (code?: number) => v
 
 /**
  * Directories this process extracted archives into. Only directories created through
- * create() are ever deleted, so a directory the user loaded is never touched.
+ * create() are ever deleted, so a directory the user loaded is never touched. A directory
+ * is deleted on release only once no attached owner (store) reads from it any more.
  */
 export class ExtractionTracker {
   private readonly owned = new Set<string>();
   private readonly byOwner = new WeakMap<object, string>();
+  /** Owners attached per directory. */
+  private readonly holders = new Map<string, number>();
 
   get size(): number {
     return this.owned.size;
   }
 
-  /** A new, empty `bug-report-extract-*` directory inside `parent`. */
+  /** A new `bug-report-extract-*` directory inside `parent`, holding only the ownership marker. */
   async create(parent: string): Promise<string> {
     const dir = await mkdtemp(join(parent, EXTRACT_DIR_PREFIX));
     this.owned.add(dir);
+    try {
+      await writeFile(join(dir, EXTRACT_MARKER_FILE), `${process.pid}\n`);
+    } catch (e) {
+      await this.remove(dir);
+      throw e;
+    }
     return dir;
   }
 
@@ -123,9 +138,23 @@ export class ExtractionTracker {
     return this.owned.has(dir);
   }
 
-  /** Deletes `dir` if this tracker created it; returns whether it did. */
+  /** The tracked directory that is `path` or contains it (symlinks resolved), if any. */
+  async containing(path: string): Promise<string | undefined> {
+    const candidates = new Set([resolve(path)]);
+    const real = await realpath(path).catch(() => null);
+    if (real) candidates.add(real);
+    for (const dir of this.owned) {
+      const dirs = new Set([dir]);
+      const realDir = await realpath(dir).catch(() => null);
+      if (realDir) dirs.add(realDir);
+      for (const d of dirs) for (const p of candidates) if (p === d || p.startsWith(d + sep)) return dir;
+    }
+    return undefined;
+  }
+
+  /** Deletes `dir` if this tracker created it and no owner holds it; returns whether it did. */
   async remove(dir: string): Promise<boolean> {
-    if (!this.owned.has(dir)) return false;
+    if (!this.owned.has(dir) || (this.holders.get(dir) ?? 0) > 0) return false;
     await rm(dir, { recursive: true, force: true });
     this.owned.delete(dir);
     return true;
@@ -133,14 +162,22 @@ export class ExtractionTracker {
 
   /** Ties a created directory to the object (a store) that reads from it. */
   attach(owner: object, dir: string): void {
-    if (this.owned.has(dir)) this.byOwner.set(owner, dir);
+    if (!this.owned.has(dir) || this.byOwner.get(owner) === dir) return;
+    this.byOwner.set(owner, dir);
+    this.holders.set(dir, (this.holders.get(dir) ?? 0) + 1);
   }
 
-  /** Deletes the directory tied to `owner`, if any. */
+  /** Detaches `owner`, deleting its directory once no other owner holds it. */
   async release(owner: object): Promise<void> {
     const dir = this.byOwner.get(owner);
     if (!dir) return;
     this.byOwner.delete(owner);
+    const left = (this.holders.get(dir) ?? 1) - 1;
+    if (left > 0) {
+      this.holders.set(dir, left);
+      return;
+    }
+    this.holders.delete(dir);
     await this.remove(dir);
   }
 
@@ -150,11 +187,51 @@ export class ExtractionTracker {
       try {
         rmSync(dir, { recursive: true, force: true });
         this.owned.delete(dir);
+        this.holders.delete(dir);
       } catch {
         // Best effort at exit: nothing can be reported any more.
       }
     }
   }
+}
+
+/** Whether a process with this pid exists (EPERM: it does, owned by another user). */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Deletes `bug-report-extract-*` directories in `parent` left by a server that died
+ * without cleaning up (SIGKILL, crash). Only real directories (not symlinks) that hold our
+ * marker with a valid pid, where that process is gone, are deleted; anything else,
+ * including a directory without the marker, is left alone. Returns the deleted paths.
+ */
+export async function sweepStaleExtractions(parent: string, isAlive: (pid: number) => boolean = processAlive): Promise<string[]> {
+  const names = await readdir(parent).catch(() => [] as string[]);
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!name.startsWith(EXTRACT_DIR_PREFIX)) continue;
+    const dir = join(parent, name);
+    try {
+      if (!(await lstat(dir)).isDirectory()) continue;
+      const marker = join(dir, EXTRACT_MARKER_FILE);
+      if (!(await lstat(marker)).isFile()) continue;
+      const text = (await readFile(marker, "utf8")).trim();
+      if (!/^\d+$/.test(text)) continue;
+      const pid = Number(text);
+      if (pid === process.pid || isAlive(pid)) continue;
+      await rm(dir, { recursive: true, force: true });
+      removed.push(dir);
+    } catch {
+      // Unreadable, or removed meanwhile: leave it.
+    }
+  }
+  return removed;
 }
 
 /** The tracker the server uses for every archive it extracts. */

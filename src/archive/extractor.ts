@@ -1,6 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import * as tar from "tar";
+import { EXTRACT_MARKER_FILE } from "./extraction.js";
 
 export interface FileEntry {
   relativePath: string;
@@ -54,6 +55,8 @@ async function walkDir(basePath: string, currentPath: string, files: FileEntry[]
   const entries = await readdir(currentPath, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = join(currentPath, entry.name);
+    // The ownership marker of our extraction dir is not part of the report.
+    if (currentPath === basePath && entry.name === EXTRACT_MARKER_FILE) continue;
     if (entry.isDirectory()) {
       await walkDir(basePath, fullPath, files);
     } else if (entry.isFile()) {
