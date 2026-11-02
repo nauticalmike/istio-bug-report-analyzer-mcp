@@ -183,7 +183,7 @@ export function createServer(config: ServerConfig) {
 
   server.tool(
     "find_errors",
-    "Scan all logs for error/warning lines, deduplicate by pattern, group by component. Patterns are paged with limit/offset, most frequent first.",
+    "Scan all logs for error/warning lines and group them into patterns (volatile tokens such as timestamps, IPs, ids and durations normalized), with the number of pods per pattern. Errors rank before warnings, then by count; known noise (probe and metrics-scrape failures, etc.) is tagged and listed last. Patterns are paged with limit/offset.",
     {
       component: z.enum(["proxy", "istiod", "operator", "cni", "all"]).optional().describe("Component to scan (default: all)"),
       keyword: z.string().optional().describe("Filter to lines containing this keyword"),
