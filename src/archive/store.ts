@@ -14,6 +14,7 @@ import {
   type PodNameScan,
   type StaleProxyDirs,
 } from "./completeness.js";
+import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
 import { extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
@@ -349,6 +350,21 @@ export class BugReportStore {
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
+  }
+
+  /**
+   * Streams a file line by line (see scanFileLines), for files of any size: whole-file
+   * reads fail past V8's ~512 MiB string limit. Null when the file is not in the archive;
+   * rejects when it cannot be read.
+   */
+  async scanFileLines(relativePath: string, onLine: LineHandler, opts?: LineScanOptions): Promise<LineScanStats | null> {
+    const absolutePath = this.pathIndex.get(relativePath);
+    if (!absolutePath) return null;
+    return scanFileLines(absolutePath, onLine, opts);
+  }
+
+  hasFile(relativePath: string): boolean {
+    return this.pathIndex.has(relativePath);
   }
 
   // === Public Query Methods ===

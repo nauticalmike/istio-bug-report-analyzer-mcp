@@ -100,3 +100,26 @@ describe("getLogs", () => {
     expect(text).toBeTruthy();
   });
 });
+
+describe("getLogs on a line longer than the scanner's line cap", () => {
+  let tempDir: string;
+
+  afterAll(async () => {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("reports the line's full length and that it was cut while reading", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "logs-long-line-"));
+    const dir = join(tempDir, "bug-report", "proxies", "ns", "long-pod-0");
+    await mkdir(dir, { recursive: true });
+    const long = `2026-01-01T00:00:00Z\tinfo\tdump ${"d".repeat(3 * 1024 * 1024)}`;
+    await writeFile(join(dir, "istio-proxy.log"), `${long}\n2026-01-01T00:00:01Z\tinfo\tafter\n`);
+    const store = await BugReportStore.fromDirectory(join(tempDir, "bug-report"));
+    const text = ((await getLogs(store, { component: "proxy" })).content[0] as { type: "text"; text: string }).text;
+    const shownChars = 2_000;
+    const full = "[proxy/ns/long-pod-0] ".length + long.length;
+    expect(text).toContain(`… [${(full - shownChars).toLocaleString("en-US")} more chars]`);
+    expect(text).toContain("[proxy/ns/long-pod-0] 2026-01-01T00:00:01Z\tinfo\tafter");
+    expect(text).toContain("Note: 1 line(s) longer than 1 MB were matched on their first 1 MB only.");
+  });
+});

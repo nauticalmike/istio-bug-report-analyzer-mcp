@@ -47,7 +47,7 @@ Then restart Claude Code to pick up the new skill.
 | `get_logs` | Proxy, ztunnel, istiod and CNI logs with severity/keyword filtering; most recent lines by default, `offset` pages from the oldest |
 | `get_istiod_debug` | Istiod debug endpoints (syncz, configz, mesh, etc.), with the reason when they were not collected; paged by character `offset` |
 | `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive; the data-completeness verdict comes first, and checks that could not be evaluated are listed (see [Diagnostics](#diagnostics)) |
-| `find_errors` | Scan logs for error/warning lines by log level, deduplicate by pattern; paged with `limit`/`offset` |
+| `find_errors` | Scan logs for error/warning lines by log level and group them into patterns (timestamps, addresses, ids, durations and pod-hash suffixes normalized), with a pod count per pattern; errors rank before warnings and known noise (probe and scrape failures, etc.) last; paged with `limit`/`offset` |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
 | `list_files` | List all files in the archive; paged with `offset` |
 | `get_raw_file` | Read any file from the archive, of any size, by byte range (`offset`/`length`) |
