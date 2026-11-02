@@ -289,11 +289,14 @@ function proxyRole(p: ParsedResource): string | null {
  * Sidecar proxies per namespace: from the pod dump (with the pods, for selector matching) in
  * the namespaces it covers, else counted from the collected proxy directories. Without
  * cluster/k8s-resources the pod dump is cluster/pods alone, which holds only the Istio namespace.
+ * A namespace with any parsed pod is covered even when the pod inventory does not list it (a
+ * dump the inventory's scan gave up on), so its proxy dirs never add to its parsed pods.
  */
 function sidecarsByNamespace(store: BugReportStore): Map<string, { count: number; pods?: ParsedResource[] }> {
   const byNs = new Map<string, { count: number; pods?: ParsedResource[] }>();
   const pods = store.getClusterResources({ kind: "Pod", group: "" });
-  const covered = pods.length > 0 ? store.getPodInventory().namespaces : new Set<string>();
+  const covered = new Set<string>(pods.length > 0 ? store.getPodInventory().namespaces : []);
+  for (const p of pods) covered.add(p.metadata.namespace ?? "default");
   for (const p of pods) {
     const phase = obj(p.status)?.phase;
     if (phase === "Succeeded" || phase === "Failed" || proxyRole(p) !== "sidecar") continue;

@@ -1,10 +1,24 @@
-import { MAX_STRING_BYTES } from "./namespace-scan.js";
+import { constants as bufferConstants } from "node:buffer";
+import { getHeapStatistics } from "node:v8";
+
+/**
+ * Largest file that can be read as one string; a UTF-8 file never decodes to more
+ * UTF-16 units than it has bytes. Bigger dumps exist in the field (550 MB+ for
+ * clusters with ~600 namespaces), and those can only be parsed item by item.
+ */
+export const MAX_STRING_BYTES = bufferConstants.MAX_STRING_LENGTH;
 
 // Retained heap per dump byte when parsed item by item: measured 1.5x on a 550 MB
 // dump and 2.3x on a 1.2 GB one, plus headroom for the tools that then filter the
 // result. Running out of heap kills the server, so a dump that would not fit is
 // skipped with a warning instead.
 export const HEAP_PER_DUMP_BYTE = 3;
+
+/**
+ * Heap per dump byte of a whole-file parse (one string of the file, then every object at
+ * once), which retains ~6x the YAML size against ~1.5-2.5x for the item-by-item parse.
+ */
+export const WHOLE_PARSE_HEAP_PER_BYTE = 6;
 
 /** Share of V8's heap_size_limit the cluster parse may plan to use. */
 const HEAP_USABLE_FRACTION = 0.9;
@@ -76,4 +90,15 @@ export function planClusterDumpLoad(
     }));
 
   return { skipped, lenient, needBytes, availableBytes: Math.max(0, budget), suggestedHeapMb };
+}
+
+/**
+ * Why a whole-file parse of `bytes` would not fit in the heap, or null when it fits. The
+ * item scan's whole-parse fallback asks this first: running out of heap kills the server.
+ */
+export function wholeParseRefusal(bytes: number, heap: HeapStats = getHeapStatistics()): string | null {
+  const need = bytes * WHOLE_PARSE_HEAP_PER_BYTE;
+  const budget = heap.heap_size_limit * HEAP_USABLE_FRACTION - heap.used_heap_size;
+  if (need <= budget) return null;
+  return `parsing it whole needs ~${formatMB(need)} of heap and ~${formatMB(Math.max(0, budget))} is available, so it would not fit in the heap`;
 }

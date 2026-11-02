@@ -71,6 +71,14 @@ describe("DIAG-004 Sidecar scoping coverage", () => {
     expect(f?.affectedResources).toContain("namespace shop: 25 sidecars, no Sidecar resource selects them");
   });
 
+  it("does not add proxy-dir counts on top of a namespace's parsed pods the pod inventory does not list", async () => {
+    // Pods parsed from a dump the inventory does not scan (or gave up on) still are the namespace's sidecars.
+    const pods = sidecars("shop", 25).map((p, i) => ({ ...p, metadata: { ...(p.metadata as Obj), name: `app-${i}-7d9f8b6c4d-x2k9p` } }));
+    const dirs = Object.fromEntries(pods.map((p) => [`proxies/shop/${(p.metadata as Obj).name}/istio-proxy.log`, "started\n"]));
+    const { f } = await run([], { ...dirs, ...crs(virtualService), "cluster/k8s-cluster-resources": dump({ apiVersion: "v1", kind: "List", items: pods }) });
+    expect(f?.affectedResources).toContain("namespace shop: 25 sidecars, no Sidecar resource selects them");
+  });
+
   it("reports each sidecar namespace without a Sidecar resource", async () => {
     const resources = [...sidecars("shop", 15), ...sidecars("cart", 25)];
     const { f } = await run(resources, crs(virtualService, sidecarResource("shop", "default")));

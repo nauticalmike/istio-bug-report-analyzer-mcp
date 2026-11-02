@@ -1,4 +1,5 @@
-import { scanClusterDumpItems } from "./namespace-scan.js";
+import { scanClusterDumpItems, type ItemScanInfo } from "./namespace-scan.js";
+import type { HeapStats } from "./heap-guard.js";
 import type { ParsedResource } from "../types.js";
 
 /**
@@ -30,6 +31,22 @@ export interface PodInventory {
   namespaces: Set<string>;
   /** False when cluster/k8s-resources gave no object, so the pod list is only cluster/pods. */
   wholeCluster: boolean;
+  /**
+   * "<file>: <reason>" for each pod dump the scan gave up on (YAML it does not model and too
+   * large, or too large for the heap, to parse whole): the pod list lacks its pods.
+   */
+  gaveUp: string[];
+  /** Parsed Pod items whose text passed the scan's `alsoKeep` test (none without one). */
+  kept: ParsedResource[];
+}
+
+export interface PodScanOptions {
+  /** Also parse and return (in `kept`) the Pod items whose raw text passes this test. */
+  alsoKeep?: (itemText: string) => boolean;
+  /** A whole parse of a dump already made (the cluster parse), by archive path, or null. */
+  wholeParse?: (relativePath: string) => ParsedResource[] | null;
+  heap?: HeapStats;
+  maxWholeParseBytes?: number;
 }
 
 // Kubernetes generates pod-name suffixes from this alphabet (no vowels, no 0, 1 or 3).
@@ -162,8 +179,8 @@ function summarizeObject(r: ParsedResource): ItemSummary {
  * multi-GB cluster/k8s-resources costs a byte scan, not a parse. `files` maps an archive
  * path to its absolute path; `wholeCluster` is set when cluster/k8s-resources gave an object.
  */
-export function scanPodInventory(files: { relativePath: string; absolutePath: string }[]): PodInventory {
-  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false };
+export function scanPodInventory(files: { relativePath: string; absolutePath: string }[], opts: PodScanOptions = {}): PodInventory {
+  const inventory: PodInventory = { available: false, pods: new Map(), namespaces: new Set(), wholeCluster: false, gaveUp: [], kept: [] };
   for (const file of files) {
     let objects = 0;
     const add = (s: ItemSummary) => {
@@ -176,13 +193,24 @@ export function scanPodInventory(files: { relativePath: string; absolutePath: st
         if (!inventory.pods.has(key)) inventory.pods.set(key, s.pod);
       }
     };
-    const parsed = scanClusterDumpItems(file.absolutePath, (text) => {
-      // A dump the scanner hands to the full parse passes each object as JSON: keep it whole.
-      if (text.startsWith("{")) return true;
-      add(summarizeText(text));
-      return false;
-    });
-    for (const r of parsed) add(summarizeObject(r));
+    const info: ItemScanInfo = {};
+    const parsed = scanClusterDumpItems(
+      file.absolutePath,
+      (text) => {
+        // A dump the scanner hands to the full parse passes each object as JSON: keep it whole.
+        if (text.startsWith("{")) return true;
+        add(summarizeText(text));
+        return opts.alsoKeep?.(text) ?? false;
+      },
+      { info, heap: opts.heap, maxWholeParseBytes: opts.maxWholeParseBytes, wholeParse: opts.wholeParse && (() => opts.wholeParse!(file.relativePath)) },
+    );
+    if (info.gaveUp) inventory.gaveUp.push(`${file.relativePath}: ${info.gaveUp}`);
+    // Whole-parsed: every object. Item-scanned: plain documents, and the List items alsoKeep
+    // passed (already summarized from their text; summarizing again changes nothing).
+    for (const r of parsed) {
+      add(summarizeObject(r));
+      if (opts.alsoKeep && r?.kind === "Pod" && opts.alsoKeep(JSON.stringify(r))) inventory.kept.push(r);
+    }
     if (file.relativePath === "cluster/k8s-resources" && objects > 0) inventory.wholeCluster = true;
   }
   return inventory;

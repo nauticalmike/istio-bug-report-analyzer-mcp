@@ -13,7 +13,7 @@ import {
 } from "./completeness.js";
 import { scanPodInventory, type PodInventory } from "./pod-inventory.js";
 import { scanFileLines, type LineHandler, type LineScanOptions, type LineScanStats } from "./line-scanner.js";
-import { MAX_STRING_BYTES, extractNamespaceResourcesFromFile, parseClusterDumpFile, scanClusterDumpItems, type ScanInfo } from "./namespace-scan.js";
+import { MAX_STRING_BYTES, extractNamespaceResourcesFromFile, parseClusterDumpFile, type ScanInfo } from "./namespace-scan.js";
 import { formatMB, planClusterDumpLoad, type DumpLoadPlan, type HeapStats } from "./heap-guard.js";
 import { parseAnalyzeOutput, parseVersionsFile, tryParseJson } from "./parser.js";
 import { needsImageFallback, withImageFallback } from "./image-versions.js";
@@ -204,6 +204,11 @@ export class BugReportStore {
   private dumpItemCounts = new Map<string, number>();
   private fileEntries = new Map<string, FileEntry>();
   private podInventory: PodInventory | null = null;
+  /**
+   * Each pod dump's objects from the cluster parse, kept only until the pod inventory is built,
+   * so a dump the item scan hands to a whole parse is not parsed a second time at load.
+   */
+  private podDumpParses = new Map<string, ParsedResource[]>();
   private cachedCompleteness: Completeness | null = null;
   private collectionScan: CollectionScan | null = null;
 
@@ -305,6 +310,7 @@ export class BugReportStore {
       try {
         const items = parseClusterDumpFile(this.pathIndex.get(file), info);
         this.dumpItemCounts.set(file, items.length);
+        if (!this.podInventory && POD_DUMP_FILES.includes(file)) this.podDumpParses.set(file, items);
         addClusterDump(acc, items);
       } catch (e) {
         issues.push(`${file} (${formatMB(sizes.get(file) ?? 0)}) could not be parsed: ${e instanceof Error ? e.message : String(e)}`);
@@ -460,19 +466,18 @@ export class BugReportStore {
     return this.effectiveVersions;
   }
 
-  /** Pods whose dump item mentions ztunnel or install-cni, across the dumps, deduplicated like the full parse. */
+  /**
+   * Pods whose dump item mentions ztunnel or install-cni, across the pod dumps, deduplicated
+   * like the full parse. Collected by the pod inventory's scan, so the dumps are read once.
+   */
   private scanDaemonSetPods(): ParsedResource[] {
     const seen = new Set<string>();
     const pods: ParsedResource[] = [];
-    const keep = (text: string) => text.includes("ztunnel") || text.includes("install-cni");
-    for (const file of CLUSTER_DUMP_FILES) {
-      for (const r of scanClusterDumpItems(this.pathIndex.get(file), keep)) {
-        if (r?.kind !== "Pod") continue;
-        const key = resourceKey(r);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        pods.push(r);
-      }
+    for (const r of this.getPodInventory().kept) {
+      const key = resourceKey(r);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pods.push(r);
     }
     return pods;
   }
@@ -652,9 +657,17 @@ export class BugReportStore {
    * scan that never depends on the full parse, so every tool sees the same pod list.
    */
   getPodInventory(): PodInventory {
-    this.podInventory ??= scanPodInventory(
-      POD_DUMP_FILES.filter((f) => this.pathIndex.has(f)).map((relativePath) => ({ relativePath, absolutePath: this.pathIndex.get(relativePath)! })),
-    );
+    if (!this.podInventory) {
+      this.podInventory = scanPodInventory(
+        POD_DUMP_FILES.filter((f) => this.pathIndex.has(f)).map((relativePath) => ({ relativePath, absolutePath: this.pathIndex.get(relativePath)! })),
+        {
+          // The ztunnel and istio-cni pods getEffectiveVersions reads image tags from.
+          alsoKeep: (text) => text.includes("ztunnel") || text.includes("install-cni"),
+          wholeParse: (file) => this.podDumpParses.get(file) ?? null,
+        },
+      );
+      this.podDumpParses.clear();
+    }
     return this.podInventory;
   }
 

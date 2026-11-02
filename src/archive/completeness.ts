@@ -124,6 +124,15 @@ function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * Why the pod list cannot be compared against: the scan gave up on cluster/k8s-resources, or
+ * (without it) on cluster/pods. Null when the pod list is as complete as the dumps.
+ */
+function podListIncomplete(pods: PodInventory): string | null {
+  const relevant = pods.gaveUp.filter((g) => g.startsWith("cluster/k8s-resources:") || !pods.wholeCluster);
+  return relevant.length > 0 ? `the pod list is incomplete: ${relevant.join("; ")}` : null;
+}
+
 export function computeCompleteness(store: BugReportStore, pods: PodInventory): Completeness {
   const stale = findStaleProxyDirs(store, pods);
   const signals = [
@@ -135,7 +144,7 @@ export function computeCompleteness(store: BugReportStore, pods: PodInventory): 
     daemonLogsSignal(store, pods, stale),
     bugReportLogSignal(store),
     clientSignal(store),
-    staleSignal(store, stale),
+    staleSignal(store, stale, pods),
     proxyCoverageSignal(store, pods),
   ];
   return { verdict: verdictOf(signals), signals };
@@ -261,14 +270,18 @@ function daemonLogsSignal(store: BugReportStore, pods: PodInventory, stale: Stal
   const notCollected = live
     .filter((p) => !(p.daemon === "ztunnel" ? ztunnelDirs : cniDirs).has(p.name))
     .map((p) => `${p.namespace}/${p.name} (${p.daemon === "ztunnel" ? "ztunnel" : "CNI"}, in cluster dump, not collected)`);
-  const emptyNote = emptyLogs.length > 0
-    ? [`${plural(emptyLogs.length, "collected dir")} with an empty or no log (istioctl skips logs with no lines in its time window): ${examples(emptyLogs).join(", ")}`]
-    : [];
+  const incomplete = podListIncomplete(pods);
+  const emptyNote = [
+    ...(emptyLogs.length > 0
+      ? [`${plural(emptyLogs.length, "collected dir")} with an empty or no log (istioctl skips logs with no lines in its time window): ${examples(emptyLogs).join(", ")}`]
+      : []),
+    ...(incomplete ? [`ztunnel and CNI pods were not compared against the pod list: ${incomplete}`] : []),
+  ];
   if (notCollected.length > 0) {
     const minor = notCollected.length < MAJOR_DAEMON_LOG_SHARE * live.length;
     return gapOf(minor, "ztunnel-cni-logs", `${notCollected.length} of ${plural(live.length, "ztunnel/CNI pod")} in the cluster dump have no logs collected`, [...examples(notCollected), ...emptyNote]);
   }
-  if (ztunnelDirs.size + cniDirs.size + live.length === 0) return signal("ztunnel-cni-logs", "ok", "no ztunnel or CNI pods");
+  if (ztunnelDirs.size + cniDirs.size + live.length === 0) return signal("ztunnel-cni-logs", "ok", "no ztunnel or CNI pods", emptyNote);
   return signal("ztunnel-cni-logs", "ok", `logs for ${ztunnelDirs.size} ztunnel and ${cniDirs.size} CNI pods`, emptyNote);
 }
 
@@ -317,6 +330,8 @@ function bugReportLogSignal(store: BugReportStore): CompletenessSignal {
  * (e.g. a capped or namespace-filtered collection), and proxy-based findings undercount.
  */
 function proxyCoverageSignal(store: BugReportStore, pods: PodInventory): CompletenessSignal {
+  const incomplete = podListIncomplete(pods);
+  if (incomplete) return signal("proxy-coverage", "not_evaluated", incomplete);
   if (!pods.available) return signal("proxy-coverage", "not_evaluated", "no pod list in the cluster dump to compare proxy dirs against");
   const injected = [...pods.pods.values()].filter((p) => p.injected && isLive(p));
   if (injected.length === 0) return signal("proxy-coverage", "ok", "no injected pods in the pod dump");
@@ -365,7 +380,9 @@ export function findStaleProxyDirs(store: BugReportStore, pods: PodInventory): S
   return { evaluated: true, stale, unknown };
 }
 
-function staleSignal(store: BugReportStore, dirs: StaleProxyDirs): CompletenessSignal {
+function staleSignal(store: BugReportStore, dirs: StaleProxyDirs, pods: PodInventory): CompletenessSignal {
+  const incomplete = podListIncomplete(pods);
+  if (incomplete && store.getProxyPods().length > 0) return signal("stale-proxy-dirs", "not_evaluated", incomplete);
   const { evaluated, stale, unknown } = dirs;
   if (!evaluated) return signal("stale-proxy-dirs", "not_evaluated", "no pod list in the cluster dump to compare proxy dirs against");
   const total = store.getProxyPods().length;

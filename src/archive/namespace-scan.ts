@@ -1,6 +1,6 @@
-import { constants as bufferConstants } from "node:buffer";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { parseYamlItem, parseYamlMultiDoc } from "./parser.js";
+import { MAX_STRING_BYTES, wholeParseRefusal, type HeapStats } from "./heap-guard.js";
 import type { ParsedResource } from "../types.js";
 
 const NL = 0x0a;
@@ -29,12 +29,7 @@ export interface ScanInfo {
   skippedItems?: number;
 }
 
-/**
- * Largest file that can be read as one string; a UTF-8 file never decodes to more
- * UTF-16 units than it has bytes. Bigger dumps exist in the field (550 MB+ for
- * clusters with ~600 namespaces), and those can only be parsed item by item.
- */
-export const MAX_STRING_BYTES = bufferConstants.MAX_STRING_LENGTH;
+export { MAX_STRING_BYTES };
 
 /** A dump the item scanner cannot handle and that is too large for the full parse. */
 export class ClusterDumpError extends Error {}
@@ -150,16 +145,36 @@ export function parseClusterDumpFile(path: string | undefined, info?: ScanInfo, 
 }
 
 /** Largest dump the item scan falls back to parsing whole when it meets YAML it does not model. */
-const MATCHING_FALLBACK_BYTES = 256 * 2 ** 20;
+export const MATCHING_FALLBACK_BYTES = 256 * 2 ** 20;
+
+/** What scanClusterDumpItems did with a dump it could not scan item by item. */
+export interface ItemScanInfo {
+  /** Set when the dump was parsed whole instead, with the reason the scan stopped. */
+  fallback?: string;
+  /** Set when it yielded nothing because it could not be parsed at all, with the reason. */
+  gaveUp?: string;
+}
+
+export interface ItemScanOptions {
+  info?: ItemScanInfo;
+  /** Heap statistics for the whole-parse guard (injectable for tests). */
+  heap?: HeapStats;
+  /** Largest dump parsed whole as the fallback (default MATCHING_FALLBACK_BYTES). */
+  maxWholeParseBytes?: number;
+  /** A whole parse of this dump already made (the cluster parse): used instead of parsing again. */
+  wholeParse?: () => ParsedResource[] | null;
+}
 
 /**
  * The resources of a cluster dump whose List item text passes `keep`, streamed like
  * parseClusterDumpFile but YAML-parsing only the kept items, so a large dump costs a
  * byte scan and a few small parses. Items that do not parse are skipped. A dump the
- * scanner does not model (JSON, flow items, ...) is parsed whole and filtered when it
- * is at most 256 MiB, else yields nothing. Plain (non-List) documents are always kept.
+ * scanner does not model (JSON, flow items, ...) is parsed whole and filtered (each object
+ * passed to `keep` as JSON), reusing `wholeParse` when given; else only when it is at most
+ * 256 MiB and the parse fits in the heap. When it cannot be parsed, `info.gaveUp` says why
+ * and nothing is returned. Plain (non-List) documents are always kept.
  */
-export function scanClusterDumpItems(path: string | undefined, keep: (itemText: string) => boolean): ParsedResource[] {
+export function scanClusterDumpItems(path: string | undefined, keep: (itemText: string) => boolean, opts: ItemScanOptions = {}): ParsedResource[] {
   if (!path) return [];
   let fd: number;
   try {
@@ -167,6 +182,7 @@ export function scanClusterDumpItems(path: string | undefined, keep: (itemText: 
   } catch {
     return [];
   }
+  const info = opts.info ?? {};
   try {
     const size = fstatSync(fd).size;
     const source: ByteSource = { size, readInto: (t, o, l, p) => readSync(fd, t, o, l, p) };
@@ -174,10 +190,29 @@ export function scanClusterDumpItems(path: string | undefined, keep: (itemText: 
       return scan(source, { all: true, lenient: true, keep });
     } catch (e) {
       if (!(e instanceof Fallback) && !(e instanceof RangeError)) throw e;
-      if (size > MATCHING_FALLBACK_BYTES) return [];
+      const why = e instanceof Fallback ? e.message : "an item is over the string limit";
+      const filter = (all: ParsedResource[]) => all.filter((r) => keep(JSON.stringify(r)));
+      const given = opts.wholeParse?.();
+      if (given) {
+        info.fallback = why;
+        return filter(given);
+      }
+      const max = opts.maxWholeParseBytes ?? MATCHING_FALLBACK_BYTES;
+      if (size > max) {
+        info.gaveUp = `uses YAML the item scan does not model (${why}) and is over the ${mib(max)} whole-parse limit`;
+        return [];
+      }
+      const refusal = wholeParseRefusal(size, opts.heap);
+      if (refusal) {
+        info.gaveUp = `uses YAML the item scan does not model (${why}); ${refusal}`;
+        return [];
+      }
       try {
-        return parseYamlMultiDoc(readFileSync(path, "utf8")).filter((r) => keep(JSON.stringify(r)));
-      } catch {
+        const all = parseYamlMultiDoc(readFileSync(path, "utf8"));
+        info.fallback = why;
+        return filter(all);
+      } catch (err) {
+        info.gaveUp = `uses YAML the item scan does not model (${why}) and did not parse whole (${err instanceof Error ? err.message : String(err)})`;
         return [];
       }
     }
