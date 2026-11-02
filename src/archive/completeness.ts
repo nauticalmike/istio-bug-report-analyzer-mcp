@@ -364,8 +364,13 @@ export function scanPodNames(paths: string[], candidates: Set<string>): PodNameS
 
 const LABELS: Record<CompletenessStatus, string> = { ok: "ok", gap: "missing", not_evaluated: "not evaluated" };
 
+export interface FormatOptions {
+  /** The caller also prints the collection issues, so the bug-report-log examples are not repeated. */
+  collectionIssuesListed?: boolean;
+}
+
 /** One verdict line, then one line per signal that is not ok (with its details indented). */
-export function formatCompleteness(c: Completeness): string[] {
+export function formatCompleteness(c: Completeness, opts: FormatOptions = {}): string[] {
   const gaps = c.signals.filter((s) => s.status === "gap");
   const unevaluated = c.signals.filter((s) => s.status === "not_evaluated");
   if (c.verdict === "complete") return [`Data completeness: complete (${c.signals.length} checks passed)`];
@@ -373,7 +378,8 @@ export function formatCompleteness(c: Completeness): string[] {
   const lines = [`Data completeness: INCOMPLETE (${counts.join(", ")}). Findings that rely on the data below may be missing or wrong:`];
   for (const s of [...gaps, ...unevaluated]) {
     lines.push(`  - [${LABELS[s.status]}] ${s.id}: ${s.summary}`);
-    for (const d of s.details) lines.push(`      ${d}`);
+    const details = opts.collectionIssuesListed && s.id === "bug-report-log" && s.details.length > 0 ? ["(listed under Collection issues below)"] : s.details;
+    for (const d of details) lines.push(`      ${d}`);
   }
   return lines;
 }

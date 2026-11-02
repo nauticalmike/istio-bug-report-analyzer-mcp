@@ -13,7 +13,8 @@ import {
 import { formatCompleteness } from "../archive/completeness.js";
 import type { Session } from "../types.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
-import { clusterPreCheckLines } from "./cluster-warnings.js";
+import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
+import { versionSummaryLines } from "./overview.js";
 
 /** Injectable for tests; the server uses the process-wide tracker and statfs. */
 export interface LoadOptions {
@@ -127,18 +128,18 @@ export async function loadBugReport(
       `Bug report loaded successfully.`,
       `Session ID: ${session.id}`,
       ``,
-      `Istio Version: ${versions?.clientVersion ?? "unknown"}`,
-      `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") ?? "unknown"}`,
+      // Completed from pod image tags when the versions file is unusable, as in get_overview.
+      ...versionSummaryLines(store.getEffectiveVersions()),
       `Proxies: ${proxyPods.length} pods`,
       `Istiod: ${istiodPods.length} pods`,
       `Analyze Results: ${errorCount} errors, ${warningCount} warnings`,
-      "",
-      ...formatCompleteness(store.getCompleteness()),
     ];
-    // From file sizes only: a dump too large for the heap is reported now, not at the first cluster tool.
-    const preCheck = clusterPreCheckLines(store);
-    if (preCheck.length > 0) summary.push("", ...preCheck);
     const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+    summary.push("", ...formatCompleteness(store.getCompleteness(), { collectionIssuesListed: issueLines.length > 0 }));
+    // From file sizes, so a dump too large for the heap is reported now, not at the first
+    // cluster tool; the parse's own warnings once the image-tag fallback has parsed the dumps.
+    const clusterLines = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
+    if (clusterLines.length > 0) summary.push("", ...clusterLines);
     if (issueLines.length > 0) summary.push("", ...issueLines);
     if (extractWarning) summary.push("", `Warning: ${extractWarning}`);
 

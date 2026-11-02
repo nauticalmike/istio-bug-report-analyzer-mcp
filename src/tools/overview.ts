@@ -1,6 +1,6 @@
 import { clusterPreCheckLines, clusterWarningLines } from "./cluster-warnings.js";
 import type { BugReportStore } from "../archive/store.js";
-import type { ComponentVersion } from "../types.js";
+import type { ComponentVersion, VersionInfo } from "../types.js";
 import { formatCompleteness } from "../archive/completeness.js";
 import { formatCollectionIssues, getCollectionIssues } from "./collection-issues.js";
 
@@ -9,6 +9,21 @@ const fromImages = (used: boolean | undefined) => (used ? " [from pod image tags
 function componentLine(label: string, list: ComponentVersion[] | undefined): string[] {
   if (!list || list.length === 0) return [];
   return [`${label}: ${list.map((v) => `${v.version} (${v.count} pod${v.count === 1 ? "" : "s"})`).join(", ")} [from pod image tags]`];
+}
+
+/**
+ * The version summary of load_bug_report and get_overview: the versions file completed from
+ * pod image tags (as get_versions and the completeness verdict use), so the two tools and the
+ * verdict never disagree. The client is the istioctl that collected the archive.
+ */
+export function versionSummaryLines(versions: VersionInfo | null): string[] {
+  return [
+    `istioctl (client) Version: ${versions?.clientVersion ?? "unknown"}`,
+    `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.controlPlane)}`,
+    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.proxies)}`,
+    ...componentLine("ztunnel", versions?.ztunnelVersions),
+    ...componentLine("istio-cni", versions?.cniVersions),
+  ];
 }
 
 export async function getOverview(store: BugReportStore) {
@@ -38,11 +53,7 @@ export async function getOverview(store: BugReportStore) {
   const lines = [
     "=== Istio Mesh Overview ===",
     "",
-    `Istio Version: ${versions?.clientVersion ?? "unknown"}`,
-    `Control Plane: ${versions?.controlPlaneVersions.map((v) => `${v.version} (${v.revision})`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.controlPlane)}`,
-    `Data Plane: ${versions?.proxyVersions.map((v) => `${v.version}${v.count > 0 ? ` (${v.count} proxies)` : ""}`).join(", ") || "unknown"}${fromImages(versions?.fromImages?.proxies)}`,
-    ...componentLine("ztunnel", versions?.ztunnelVersions),
-    ...componentLine("istio-cni", versions?.cniVersions),
+    ...versionSummaryLines(versions),
     `Data Plane Mode: ${modeInfo.mode} (${modeCounts.join(", ")})`,
     ...(modeInfo.ambientNamespaces.length > 0 ? [`  Ambient namespaces: ${modeInfo.ambientNamespaces.join(", ")}`] : []),
     ...(modeInfo.sidecarNamespaces.length > 0 ? [`  Sidecar namespaces: ${modeInfo.sidecarNamespaces.join(", ")}`] : []),
@@ -53,12 +64,11 @@ export async function getOverview(store: BugReportStore) {
     clusterResourcesLine(store),
     "",
     `Analyze Results: ${errorCount} errors, ${warningCount} warnings, ${infoCount} info`,
-    "",
-    ...formatCompleteness(store.getCompleteness()),
   ];
+  const issueLines = formatCollectionIssues(await getCollectionIssues(store));
+  lines.push("", ...formatCompleteness(store.getCompleteness(), { collectionIssuesListed: issueLines.length > 0 }));
   const warnings = store.isClusterResourcesParsed() ? clusterWarningLines(store) : clusterPreCheckLines(store);
   if (warnings.length > 0) lines.push("", ...warnings);
-  const issueLines = formatCollectionIssues(await getCollectionIssues(store));
   if (issueLines.length > 0) lines.push("", ...issueLines);
 
   return { content: [{ type: "text" as const, text: lines.join("\n") }] };

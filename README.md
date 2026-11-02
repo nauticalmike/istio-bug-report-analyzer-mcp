@@ -68,17 +68,17 @@ A bug report can be missing data without saying so: a section that failed to col
 
 | Check | Flags |
 |-------|-------|
-| `versions` | `versions` missing, no control plane version, or istioctl could not retrieve them |
+| `versions` | `versions` missing, no control plane version, or istioctl could not retrieve them (says so when the versions were derived from pod image tags instead) |
 | `k8s-resources` | `cluster/k8s-resources` missing or empty |
 | `crs` | `cluster/crs` missing, or empty while `istioctl analyze` lists Istio resources |
 | `istiod-debug` | no istiod pods or debug endpoints, or debug output only from istiod pods that serve no proxies |
 | `proxy-config-dump` | proxy dirs without a `config_dump` |
 | `ztunnel-cni-logs` | ztunnel or CNI pods (dirs, or pods in the cluster dump) without logs |
-| `bug-report-log` | auth (Unauthorized/Forbidden), 404 or timeout errors in `bug-report.log` (first 64 MiB scanned) |
-| `istioctl-client` | istioctl older than the control plane |
+| `bug-report-log` | auth (Unauthorized/Forbidden), 404 or timeout errors anywhere in `bug-report.log` |
+| `istioctl-client` | istioctl older than the control plane (the same comparison as the `get_versions` warning) |
 | `stale-proxy-dirs` | proxy dirs whose pod is not in the cluster dump (pods replaced during a long collection); the collection span from file times is shown when it is long |
 
-A check that needs data the archive does not have is reported as `not evaluated`, which also keeps the verdict from saying `complete`. `get_overview` also notes proxy dirs with no live pod next to the proxy count. The checks read only the file index and small files, plus a streaming scan of the pod dumps for pod names, so they run at load.
+A check that needs data the archive does not have is reported as `not evaluated`, which also keeps the verdict from saying `complete`. `get_overview` also notes proxy dirs with no live pod next to the proxy count. The checks read the file index and small files, a streaming scan of the pod dumps for pod names, and the collection issues of `bug-report.log`, which is streamed once at load for both; an unusable `versions` file also has the pod dump parsed for image tags. In `load_bug_report` and `get_overview` the collection errors are listed once, under "Collection issues".
 
 ## Usage with Claude Code
 
@@ -106,7 +106,7 @@ The tool extracts actual resource requests from Pod specs when available, fallin
 
 ## Diagnostics
 
-`run_diagnostics` runs the templates in `templates/`. A check that needs data the archive does not have is listed under "Not evaluated or skipped" with the reason, instead of firing or passing silently.
+`run_diagnostics` runs the templates in `templates/`. A check that needs data the archive does not have is listed under "Not evaluated or skipped" with the reason, instead of firing or passing silently: resource checks when the cluster section holding the kind (`cluster/crs` for Istio and Gateway API kinds, else `cluster/k8s-resources`) is missing, empty or unparsed; version checks when neither the `versions` file nor pod image tags give a control plane version; proxy and istiod checks whose file is over Node's string limit; and log checks when a log could not be read. The reason names the data-completeness check it comes from. Log checks stream every log line by line, whatever its size.
 
 | ID | Checks |
 |----|--------|

@@ -562,9 +562,9 @@ export class BugReportStore {
   }
 
   /**
-   * The data-completeness verdict (see completeness.ts). Computed from the file index and
-   * bounded reads; recomputed once after the cluster dump is parsed, which makes the
-   * stale-dir check exact.
+   * The data-completeness verdict (see completeness.ts). Computed from the file index,
+   * bounded reads and the load-time bug-report.log scan; recomputed once after the cluster
+   * dump is parsed, which makes the stale-dir check exact.
    */
   getCompleteness(): Completeness {
     if (this.cachedCompleteness?.parsed !== this.isClusterResourcesParsed()) {

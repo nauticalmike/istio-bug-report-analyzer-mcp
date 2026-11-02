@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -70,5 +70,15 @@ describe("cluster dump pre-check", () => {
     expect(overview).toContain("Cluster data warnings");
     expect(overview).not.toContain("Cluster dump size warning");
     expect(clusterPreCheckLines(store)).toEqual([]);
+  });
+
+  it("load_bug_report still warns about skipped dumps when the versions fallback parsed them at load", async () => {
+    // No versions file: load parses the pod dump for image tags, so the pre-check no longer applies.
+    await unlink(join(archiveDir, "versions"));
+    let store: InstanceType<typeof BugReportStore> | null = null;
+    const loaded = textOf(await loadBugReport({ path: archiveDir }, () => store, (s) => { store = s; }, () => {}));
+    expect(store!.isClusterResourcesParsed()).toBe(true);
+    expect(loaded).toContain("Cluster data warnings");
+    expect(loaded).toContain("was not parsed");
   });
 });
