@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { load } from "js-yaml";
 import type { DiagnosticTemplate, DiagnosticFinding, Signal, DataPlaneMode } from "../types.js";
-import { BugReportStore } from "../archive/store.js";
+import { BugReportStore, type CaptureSource } from "../archive/store.js";
 import { evaluateCheck } from "./signals.js";
 import { findVersionSkew, findUnsupportedVersions } from "./versions.js";
 import { MAX_STRING_BYTES } from "../archive/namespace-scan.js";
@@ -35,7 +35,8 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   version_support: (store, source) =>
     source.type === "version_support"
       ? findUnsupportedVersions(store.getEffectiveVersions(), source.supported ?? [], source.supportedSolo, {
-          asOf: store.getCaptureTime() ?? undefined,
+          asOf: store.getCaptureInfo()?.time,
+          asOfSource: captureSourceText(store),
           endOfLife: source.endOfLife,
           released: source.released,
         })
@@ -45,6 +46,18 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   istiod_replicas: (store) => singleReplicaIstiods(store),
   sidecar_scope: (store) => sidecarScopeGaps(store),
 };
+
+const CAPTURE_SOURCES: Record<CaptureSource, string> = {
+  log: "the newest log timestamp in the archive",
+  debug: "the newest log line in front of istiod debug output",
+  events: "the newest event in cluster/events",
+  pods: "the newest pod creation or start time in the pod dump; the capture was on or after it",
+};
+
+function captureSourceText(store: BugReportStore): string | undefined {
+  const source = store.getCaptureInfo()?.source;
+  return source ? CAPTURE_SOURCES[source] : undefined;
+}
 
 /** Per-run memo of issue sources, keyed by the source definition. */
 type IssueCache = Map<string, IssueResult>;

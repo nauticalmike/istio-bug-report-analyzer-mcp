@@ -44,9 +44,22 @@ describe("DIAG-006 judges support as of the capture date", () => {
     expect(f?.severity).toBe("warning");
   });
 
-  it("falls back to today's window and says so when the archive has no log timestamps", async () => {
+  it("falls back to today's window as info when the archive has no capture date", async () => {
     const files = { [PROXY_LOG]: "no timestamps here\n", [ISTIOD_LOG]: "none here either\n" };
     const f = finding(await runTemplates({ versions: versions("1.28.9"), files }, ["version"]), "DIAG-006");
-    expect(f?.affectedResources[0]).toContain("as of today: no log timestamp found in the archive");
+    expect(f?.affectedResources[0]).toContain("as of today: no capture date found in the archive");
+    // Without the capture date, today's window may postdate the archive: not a warning.
+    expect(f?.severity).toBe("info");
+  });
+
+  it("names the source when the capture date comes from cluster events", async () => {
+    const files = {
+      [PROXY_LOG]: "no timestamps here\n",
+      [ISTIOD_LOG]: "none here either\n",
+      "cluster/events": 'apiVersion: v1\nkind: Event\nmetadata:\n  name: a\nlastTimestamp: "2026-09-10T10:00:00Z"\n',
+    };
+    const f = finding(await runTemplates({ versions: versions("1.28.9"), files }, ["version"]), "DIAG-006");
+    expect(f?.severity).toBe("warning");
+    expect(f?.affectedResources[0]).toContain("on 2026-09-10 (capture date, the newest event in cluster/events");
   });
 });

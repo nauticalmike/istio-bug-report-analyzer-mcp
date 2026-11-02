@@ -132,9 +132,15 @@ describe("findUnsupportedVersions as of the capture date", () => {
     expect(issues[0].detail).toContain("supported then: 1.24, 1.25, 1.26, 1.27, 1.28");
   });
 
-  it("says the window is today's when no capture date is known", () => {
+  it("says the window is today's, as info only, when no capture date is known", () => {
     const issues = findUnsupportedVersions(info(["1.28.10"], []), supported, undefined, { endOfLife, released });
-    expect(issues[0].detail).toContain("as of today: no log timestamp found in the archive");
+    expect(issues[0].detail).toContain("as of today: no capture date found in the archive");
+    expect(issues[0].severity).toBe("info");
+  });
+
+  it("names where the capture date came from", () => {
+    const issues = findUnsupportedVersions(info(["1.28.10"], []), supported, undefined, { ...at("2026-09-01"), asOfSource: "the newest event in cluster/events" });
+    expect(issues[0].detail).toContain("on 2026-09-01 (capture date, the newest event in cluster/events; supported then:");
   });
 
   it("reports an old client on its own as info, an old control plane as a warning", () => {

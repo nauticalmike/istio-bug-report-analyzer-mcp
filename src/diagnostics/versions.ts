@@ -89,8 +89,10 @@ export function findVersionSkew(versions: VersionInfo | null): VersionIssue[] {
 }
 
 export interface SupportDates {
-  /** When the archive was captured; support is judged as of this day. Unset: today's windows. */
+  /** When the archive was captured; support is judged as of this day. Unset: today's windows, reported as info only. */
   asOf?: Date;
+  /** Where asOf came from, as shown in the finding (default: the newest log timestamp in the archive). */
+  asOfSource?: string;
   /** Upstream end-of-life day (YYYY-MM-DD) per minor that has left the supported list. */
   endOfLife?: Record<string, string>;
   /** Upstream release day (YYYY-MM-DD) per minor. */
@@ -127,6 +129,7 @@ function windowOn(current: string[], solo: boolean, day: string, dates: SupportD
  * (longer, n-4) window when one is given, and are skipped otherwise. With `dates.asOf`
  * (the capture date) the windows are those of that day. An unsupported istioctl client
  * alone is info (it only affects collection); an unsupported control plane is a warning.
+ * Without a capture date every issue is info: today's window may postdate the archive.
  */
 export function findUnsupportedVersions(
   versions: VersionInfo | null,
@@ -153,10 +156,11 @@ export function findUnsupportedVersions(
     if (newest && distance(m, newest) > 0) continue;
     const scope = solo ? "Solo distribution of Istio minor" : "Istio minor";
     const clientOnly = severity === "info" ? "; istioctl only, the mesh is not affected: collect with a supported istioctl" : "";
+    const source = dates.asOfSource ?? "the newest log timestamp in the archive";
     const detail = day
-      ? `${role} ${version} was not a supported ${scope} on ${day} (capture date, the newest log timestamp in the archive; supported then: ${window.join(", ")}${clientOnly})`
-      : `${role} ${version} is not a supported ${scope} (supported: ${window.join(", ")}; as of today: no log timestamp found in the archive${clientOnly})`;
-    issues.push({ kind: "unsupported-version", detail, severity });
+      ? `${role} ${version} was not a supported ${scope} on ${day} (capture date, ${source}; supported then: ${window.join(", ")}${clientOnly})`
+      : `${role} ${version} is not a supported ${scope} (supported: ${window.join(", ")}; as of today: no capture date found in the archive${clientOnly})`;
+    issues.push({ kind: "unsupported-version", detail, severity: day ? severity : "info" });
   }
   return issues;
 }

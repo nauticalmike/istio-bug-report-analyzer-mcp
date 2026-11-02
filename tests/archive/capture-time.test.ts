@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createMinimalArchive } from "../fixtures/create-fixture.js";
@@ -53,11 +53,60 @@ describe("BugReportStore.getCaptureTime", () => {
     expect(store.getCaptureTime()?.toISOString()).toBe("2026-03-18T11:00:00.000Z");
   });
 
-  it("is null when no log carries a timestamp", async () => {
+  /** An archive whose collected logs carry no timestamp. */
+  async function withoutLogTimes(): Promise<string> {
     const dir = await archive();
     await writeFile(join(dir, "proxies", "default", "test-pod-abc123", "istio-proxy.log"), "plain\n");
     await writeFile(join(dir, "istio", "istio-system", "istiod-abc", "discovery.log"), "plain\n");
-    const store = await BugReportStore.fromDirectory(dir);
+    return dir;
+  }
+
+  it("is null when nothing in the archive carries a timestamp", async () => {
+    const store = await BugReportStore.fromDirectory(await withoutLogTimes());
     expect(store.getCaptureTime()).toBeNull();
+    expect(store.getCaptureInfo()).toBeNull();
+  });
+
+  it("says a log timestamp was the source", async () => {
+    const store = await BugReportStore.fromDirectory(await archive());
+    expect(store.getCaptureInfo()?.source).toBe("log");
+  });
+
+  it("reads *.log files outside the usual directories", async () => {
+    const dir = await withoutLogTimes();
+    await mkdir(join(dir, "extra", "node-1"), { recursive: true });
+    await writeFile(join(dir, "extra", "node-1", "kubelet.log"), "2026-04-01T12:00:00Z\tinfo\tsynced\n");
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-01T12:00:00Z"), source: "log" });
+  });
+
+  it("falls back to the log lines istioctl writes in front of istiod debug output", async () => {
+    const dir = await withoutLogTimes();
+    await writeFile(join(dir, "istio", "istio-system", "istiod-abc", "debug", "syncz"), "2026-04-02T08:00:00.000000Z\tinfo\tfetching\n[]");
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-02T08:00:00Z"), source: "debug" });
+  });
+
+  it("falls back to the newest event in cluster/events", async () => {
+    const dir = await withoutLogTimes();
+    await writeFile(
+      join(dir, "cluster", "events"),
+      [
+        "apiVersion: v1\nkind: Event\nmetadata:\n  name: a\n  creationTimestamp: \"2026-04-03T09:00:00Z\"\nlastTimestamp: \"2026-04-03T10:00:00Z\"",
+        "apiVersion: v1\nkind: Event\nmetadata:\n  name: b\neventTime: \"2026-04-03T11:30:00.123456Z\"\nlastTimestamp: null",
+      ].join("\n---\n"),
+    );
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-03T11:30:00.123Z"), source: "events" });
+  });
+
+  it("falls back to the newest pod creation or start time in the pod dump", async () => {
+    const dir = await withoutLogTimes();
+    await writeFile(
+      join(dir, "cluster", "pods"),
+      "apiVersion: v1\nkind: Pod\nmetadata:\n  name: istiod-abc\n  namespace: istio-system\n  creationTimestamp: \"2026-04-04T07:00:00Z\"\nstatus:\n  startTime: \"2026-04-04T07:05:00Z\"\n",
+    );
+    const store = await BugReportStore.fromDirectory(dir);
+    expect(store.getCaptureInfo()).toEqual({ time: new Date("2026-04-04T07:05:00Z"), source: "pods" });
   });
 });

@@ -120,6 +120,52 @@ const MAX_CAPTURE_LOGS = 500;
 const TS = String.raw`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z`;
 const LOG_TIMESTAMP_RE = new RegExp(String.raw`(?:^\[?(${TS})|"(?:time|timestamp|ts)"\s*:\s*"(${TS})")`, "gm");
 
+// Capture-time fallbacks when no log has a timestamp: event times, then pod creation/start times.
+const EVENT_TIME_RE = new RegExp(String.raw`["']?(?:lastTimestamp|eventTime|firstTimestamp)["']?\s*:\s*["']?(${TS})`, "g");
+const POD_TIME_RE = new RegExp(String.raw`["']?(?:creationTimestamp|startTime)["']?\s*:\s*["']?(${TS})`, "g");
+// istioctl writes its log lines in front of some istiod debug output.
+const DEBUG_HEAD_BYTES = 16 * 1024;
+const MAX_CAPTURE_DEBUG_FILES = 200;
+const TIME_SCAN_CHUNK = 1 << 20;
+
+/** Where getCaptureInfo found the capture time. */
+export type CaptureSource = "log" | "debug" | "events" | "pods";
+
+/** The newest match (group 1, a timestamp) of `re` in a file of any size, at most `limit`; -Infinity if none. */
+function newestTimeIn(path: string | undefined, re: RegExp, limit: number): number {
+  let newest = -Infinity;
+  if (!path) return newest;
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch {
+    return newest;
+  }
+  try {
+    const buf = Buffer.alloc(TIME_SCAN_CHUNK);
+    let rest = "";
+    const take = (text: string) => {
+      for (const m of text.matchAll(re)) {
+        const t = Date.parse(m[1]);
+        if (t > newest && t <= limit) newest = t;
+      }
+    };
+    let n: number;
+    while ((n = readSync(fd, buf, 0, TIME_SCAN_CHUNK, null)) > 0) {
+      const text = rest + buf.toString("latin1", 0, n);
+      const cut = text.lastIndexOf("\n");
+      take(cut === -1 ? "" : text.slice(0, cut));
+      rest = cut === -1 ? text.slice(-4096) : text.slice(cut + 1).slice(-4096);
+    }
+    take(rest);
+  } catch {
+    // Unreadable: no time from this file.
+  } finally {
+    closeSync(fd);
+  }
+  return newest;
+}
+
 function logRank(path: string): number {
   if (path === "bug-report.log") return 0;
   if (path.startsWith("istio/")) return 1;
@@ -143,7 +189,7 @@ export class BugReportStore {
   private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
   private effectiveVersions: VersionInfo | null | undefined = undefined;
-  private captureTime: Date | null | undefined = undefined;
+  private captureInfo: { time: Date; source: CaptureSource } | null | undefined = undefined;
   private dumpItemCounts = new Map<string, number>();
   private fileEntries = new Map<string, FileEntry>();
   private scannedPodNames: PodNameScan | null = null;
@@ -415,29 +461,50 @@ export class BugReportStore {
   }
 
   /**
-   * When the archive was captured: the newest log timestamp in the tails of bug-report.log
-   * and the istiod, proxy, CNI and operator logs (logs end at collection time). Only the last
-   * LOG_TAIL_BYTES of each file are read, at most MAX_CAPTURE_LOGS files. Timestamps more
-   * than a day after now are ignored. Null when no log line carries a timestamp.
+   * When the archive was captured, from the first source that has a time: the newest log
+   * timestamp in the tails of the archive's *.log files (bug-report.log and istiod first; logs
+   * end at collection time; at most MAX_CAPTURE_LOGS files, the last LOG_TAIL_BYTES of each),
+   * then the log lines in front of istiod debug output, then the newest event in
+   * cluster/events, then the newest pod creation or start time in the pod dumps (a lower
+   * bound). Times more than a day after now are ignored. Null when nothing has a time.
    */
-  getCaptureTime(): Date | null {
-    if (this.captureTime !== undefined) return this.captureTime;
-    const logs = this.index.files
-      .filter((f) => f.relativePath === "bug-report.log" || /^(istio|proxies|cni|operator)\/.*\.log$/.test(f.relativePath))
-      // bug-report.log and istiod first: they are few and always end at collection time.
-      .sort((a, b) => logRank(a.relativePath) - logRank(b.relativePath))
-      .slice(0, MAX_CAPTURE_LOGS);
+  getCaptureInfo(): { time: Date; source: CaptureSource } | null {
+    if (this.captureInfo !== undefined) return this.captureInfo;
     const limit = Date.now() + 24 * 3600 * 1000;
-    let newest = -Infinity;
-    for (const f of logs) {
-      const tail = this.readFileRange(f.relativePath, Math.max(0, f.size - LOG_TAIL_BYTES), LOG_TAIL_BYTES)?.text ?? "";
-      for (const m of tail.matchAll(LOG_TIMESTAMP_RE)) {
+    const newestIn = (text: string) => {
+      let newest = -Infinity;
+      for (const m of text.matchAll(LOG_TIMESTAMP_RE)) {
         const t = Date.parse(m[1] ?? m[2]);
         if (t > newest && t <= limit) newest = t;
       }
+      return newest;
+    };
+    const found = (t: number, source: CaptureSource) => (Number.isFinite(t) ? { time: new Date(t), source } : null);
+
+    const logs = this.index.files
+      .filter((f) => f.relativePath.endsWith(".log"))
+      // bug-report.log and istiod first: they are few and always end at collection time.
+      .sort((a, b) => logRank(a.relativePath) - logRank(b.relativePath))
+      .slice(0, MAX_CAPTURE_LOGS);
+    let newest = -Infinity;
+    for (const f of logs) {
+      newest = Math.max(newest, newestIn(this.readFileRange(f.relativePath, Math.max(0, f.size - LOG_TAIL_BYTES), LOG_TAIL_BYTES)?.text ?? ""));
     }
-    this.captureTime = Number.isFinite(newest) ? new Date(newest) : null;
-    return this.captureTime;
+    let info = found(newest, "log");
+    if (!info) {
+      const debug = this.index.files.filter((f) => /^istio\/[^/]+\/[^/]+\/debug\//.test(f.relativePath)).slice(0, MAX_CAPTURE_DEBUG_FILES);
+      for (const f of debug) newest = Math.max(newest, newestIn(this.readFileRange(f.relativePath, 0, DEBUG_HEAD_BYTES)?.text ?? ""));
+      info = found(newest, "debug");
+    }
+    info ??= found(newestTimeIn(this.pathIndex.get("cluster/events"), EVENT_TIME_RE, limit), "events");
+    info ??= found(Math.max(...POD_DUMP_FILES.map((f) => newestTimeIn(this.pathIndex.get(f), POD_TIME_RE, limit))), "pods");
+    this.captureInfo = info;
+    return info;
+  }
+
+  /** The capture time of getCaptureInfo, or null. */
+  getCaptureTime(): Date | null {
+    return this.getCaptureInfo()?.time ?? null;
   }
 
   getAnalyzeResults(filter?: { severity?: string; code?: string }): AnalyzeResult[] {
