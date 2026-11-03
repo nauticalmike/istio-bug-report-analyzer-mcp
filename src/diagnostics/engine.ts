@@ -9,6 +9,7 @@ import { MAX_STRING_BYTES } from "../archive/namespace-scan.js";
 import { formatMB } from "../archive/heap-guard.js";
 import { listLogSources } from "../tools/log-sources.js";
 import { scanLogSources } from "../tools/log-scan.js";
+import { MESH_CHECKS } from "./mesh-checks/index.js";
 import {
   clusterSectionGap,
   clusterSectionOf,
@@ -45,6 +46,12 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   demo_profile: (store) => demoProfileEvidence(store),
   istiod_replicas: (store) => singleReplicaIstiods(store),
   sidecar_scope: (store) => sidecarScopeGaps(store),
+  mesh_check: (store, source) => {
+    if (source.type !== "mesh_check") return [];
+    const check = MESH_CHECKS[source.check];
+    if (!check) return { notEvaluated: `not evaluated: unknown mesh check "${source.check}"` };
+    return check(store);
+  },
 };
 
 const CAPTURE_SOURCES: Record<CaptureSource, string> = {

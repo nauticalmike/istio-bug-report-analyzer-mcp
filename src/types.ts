@@ -175,7 +175,9 @@ export type SignalSource =
   | { type: "envoyfilter_risks" }
   | { type: "demo_profile" }
   | { type: "istiod_replicas" }
-  | { type: "sidecar_scope" };
+  | { type: "sidecar_scope" }
+  /** A mesh check by id from MESH_CHECKS (src/diagnostics/mesh-checks/index.ts). */
+  | { type: "mesh_check"; check: string };
 
 export type SignalCheck =
   | { op: "exists" }

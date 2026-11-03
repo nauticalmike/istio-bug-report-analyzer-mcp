@@ -35,8 +35,8 @@ export async function cleanupArchives(): Promise<void> {
   await Promise.all(tempDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
 }
 
-/** Builds a minimal archive per spec and runs the shipped templates; the engine keeps the run's not-evaluated list. */
-export async function runEngine(spec: ArchiveSpec, categories: string[]): Promise<{ findings: DiagnosticFinding[]; engine: DiagnosticEngine }> {
+/** Builds a minimal archive per spec and loads it. */
+export async function buildStore(spec: ArchiveSpec): Promise<BugReportStore> {
   const tempDir = await mkdtemp(join(tmpdir(), "template-harness-"));
   tempDirs.push(tempDir);
   const archiveDir = join(tempDir, "bug-report");
@@ -67,7 +67,12 @@ export async function runEngine(spec: ArchiveSpec, categories: string[]): Promis
       await writeFile(file, content);
     }
   }
-  const store = await BugReportStore.fromDirectory(archiveDir);
+  return BugReportStore.fromDirectory(archiveDir);
+}
+
+/** Builds a minimal archive per spec and runs the shipped templates; the engine keeps the run's not-evaluated list. */
+export async function runEngine(spec: ArchiveSpec, categories: string[]): Promise<{ findings: DiagnosticFinding[]; engine: DiagnosticEngine }> {
+  const store = await buildStore(spec);
   const engine = new DiagnosticEngine();
   await engine.loadTemplates(TEMPLATES_DIR);
   const findings = await engine.run(store, categories, spec.mode);
@@ -130,5 +135,38 @@ export function deployment(namespace: string, name: string, opts: { labels?: Obj
     kind: "Deployment",
     metadata: { name, namespace, labels: opts.labels ?? {} },
     spec: { replicas: opts.replicas ?? 1, template: { spec: { containers: opts.containers ?? [] } } },
+  };
+}
+
+export function namespace(name: string, labels: Obj = {}): Obj {
+  return { apiVersion: "v1", kind: "Namespace", metadata: { name, labels } };
+}
+
+export function service(namespaceName: string, name: string, selector: Obj | undefined, labels: Obj = {}, ports: Obj[] = [{ name: "http", port: 80 }]): Obj {
+  return { apiVersion: "v1", kind: "Service", metadata: { name, namespace: namespaceName, labels }, spec: { ...(selector ? { selector } : {}), ports } };
+}
+
+/** A Gateway API waypoint Gateway; `ready` sets status.addresses, which istiod requires. */
+export function waypoint(namespaceName: string, name: string, opts: { labels?: Obj; ready?: boolean; className?: string; from?: string } = {}): Obj {
+  return {
+    apiVersion: "gateway.networking.k8s.io/v1",
+    kind: "Gateway",
+    metadata: { name, namespace: namespaceName, labels: opts.labels ?? {} },
+    spec: {
+      gatewayClassName: opts.className ?? "istio-waypoint",
+      listeners: [{ name: "mesh", port: 15008, protocol: "HBONE", ...(opts.from ? { allowedRoutes: { namespaces: { from: opts.from } } } : {}) }],
+    },
+    status: opts.ready === false ? {} : { addresses: [{ type: "IPAddress", value: "10.0.0.9" }] },
+  };
+}
+
+/** An application pod captured by ztunnel. */
+export function ambientPod(namespaceName: string, name: string, labels: Obj = { app: name }): Obj {
+  return {
+    apiVersion: "v1",
+    kind: "Pod",
+    metadata: { name, namespace: namespaceName, labels, annotations: { "ambient.istio.io/redirection": "enabled" } },
+    spec: { containers: [{ name: "app", image: "registry.example.com/app:2.0" }] },
+    status: { phase: "Running" },
   };
 }
