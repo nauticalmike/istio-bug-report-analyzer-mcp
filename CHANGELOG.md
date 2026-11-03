@@ -3,7 +3,7 @@
 Notable changes for MCP clients and the people who read the tool output. Versions follow
 the npm package (`istio-bug-report-analyzer-mcp`).
 
-## 0.4.3 (unreleased)
+## 0.4.3 (2026-11-02)
 
 ### Changed output and behavior
 
