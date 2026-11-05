@@ -19,6 +19,7 @@ import { ambientReadinessReport } from "./tools/ambient-readiness.js";
 import { findErrors } from "./tools/find-errors.js";
 import { estimateResourceSavings } from "./tools/resource-savings.js";
 import { SERVER_VERSION } from "./version.js";
+import { SOLO_MODE_INSTRUCTIONS } from "./solo-mode.js";
 import { CONTENT_BUDGET_CHARS, OUTPUT_BUDGET_CHARS } from "./tools/output-budget.js";
 
 export function createServer(config: ServerConfig) {
@@ -30,10 +31,13 @@ export function createServer(config: ServerConfig) {
   const getStore = () => currentStore;
   const setStore = (store: BugReportStore) => { currentStore = store; };
 
-  const server = new McpServer({
-    name: "istio-bug-report-analyzer",
-    version: SERVER_VERSION,
-  });
+  const server = new McpServer(
+    {
+      name: "istio-bug-report-analyzer",
+      version: SERVER_VERSION,
+    },
+    config.soloMode ? { instructions: SOLO_MODE_INSTRUCTIONS } : undefined,
+  );
 
   // === Setup Tools ===
 
