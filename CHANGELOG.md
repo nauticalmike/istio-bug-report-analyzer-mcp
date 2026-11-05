@@ -3,6 +3,59 @@
 Notable changes for MCP clients and the people who read the tool output. Versions follow
 the npm package (`istio-bug-report-analyzer-mcp`).
 
+## 0.6.1 (2026-11-05)
+
+### New
+
+- **`ambient_readiness_report` tool.** Migration stage, a per-namespace table and every
+  sidecar-to-ambient blocker with its fix, then a cutover checklist. On a sidecar-only mesh
+  it reports what the workloads would hit if moved. Paged with `offset`, filtered with
+  `namespace`.
+- **Thirty-one diagnostics, DIAG-007 to DIAG-037.** See the README's Diagnostics table.
+  - Revision and webhook hygiene (DIAG-007, DIAG-008) on every mesh.
+  - Ambient readiness (DIAG-009 to DIAG-018): L7 policy ztunnel cannot enforce, lost egress
+    lockdown, migration blockers, unusable waypoints, VirtualService / DestinationRule /
+    EnvoyFilter features with no waypoint, ingress that skips the waypoint, ignored capture
+    annotations, ambient install consistency and NetworkPolicies that block HBONE.
+  - Control plane, security, ambient data plane and config quality (DIAG-019 to DIAG-037):
+    rejected or unacknowledged xDS, istiod overload, config conflicts istiod drops, proxy
+    memory pressure, certificate issuance and renewal failures, JWKS fetch failures, broken
+    gateway TLS credentials, literal credentials in mesh workload env, risky istiod flags,
+    unverified TLS origination, mTLS posture, istio-cni and ztunnel node health, ztunnel
+    error classes, severe `istioctl analyze` codes, tracing providers, graceful-shutdown
+    budget, protocol selection, inert locality load balancing and istiod replica spread.
+    They are not part of `ambient_readiness_report`.
+- **Shared log scan.** Log-based checks register their patterns and share one streamed pass
+  over the logs (ztunnel logs get one more, for the access-log classifier). Logs of pods that
+  are no longer in the pod dump are skipped and counted; `meshctl` report layouts
+  (`<cluster>/logs/<ns>/<pod>/`) are read too. DIAG-023 also re-reads the logs of proxies with
+  certificate failures to grade their renewal episodes.
+- **Redaction.** JWKS and TLS-origination hosts are shown as short hashes, log examples and
+  xDS error texts have tokens, keys and credentials masked, and credentials in env are
+  reported by name only.
+- **Solo mode** (`SOLO_MODE=true`) gives the MCP client instructions naming the Solo-internal
+  Claude plugins to use for enrichment (Customer360, the Solo knowledge base, the support
+  agent, migration assessment). It adds no analysis of its own.
+
+### Changed output and behavior
+
+- **DIAG-002** no longer reports high trace sampling on its own: outside the demo profile
+  DIAG-033 does. With demo evidence it also lists Telemetry and meshConfig sampling.
+- **DIAG-003** says that PodDisruptionBudgets are not collected; replica spread is DIAG-037.
+- **Mesh config comes from the live revision.** When several revisions have ConfigMaps, the
+  one whose istiod pods are running (then the one with most replicas) is used, and istiod
+  debug data from pods no longer in the pod dump is used only when nothing else exists.
+- **Mesh config enum defaults.** `outboundTrafficPolicy` / `inboundTrafficPolicy` objects
+  read from istiod's `debug/mesh` without a `mode` (protojson omits the zero value) now read
+  as `REGISTRY_ONLY` / `PASSTHROUGH`.
+- **`run_diagnostics` lists at most 25 affected items for DIAG-007 to DIAG-018**, most severe
+  first, with a count of the rest; `ambient_readiness_report` lists them all. Other templates
+  keep their full list.
+- **Not-evaluated reasons** that join several sources say "not evaluated:" once.
+- **Faster resource lookups.** Cluster resources are indexed by kind, namespace and name
+  once per load, so checks that join pods, Services and policies stay fast on archives with
+  tens of thousands of objects.
+
 ## 0.4.3 (2026-11-02)
 
 ### Changed output and behavior

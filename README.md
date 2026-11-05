@@ -49,6 +49,7 @@ Then restart Claude Code to pick up the new skill.
 | `run_diagnostics` | Run diagnostic templates (version skew, EOL versions, config checks) against the archive; the data-completeness verdict comes first, and checks that could not be evaluated are listed (see [Diagnostics](#diagnostics)) |
 | `find_errors` | Scan logs for error/warning lines by log level and group them into patterns (timestamps, addresses, ids, durations and pod-hash suffixes normalized), with a pod count per pattern; errors rank before warnings and known noise (probe and scrape failures, etc.) last; paged with `limit`/`offset` |
 | `estimate_resource_savings` | CPU/memory impact analysis for sidecar-to-ambient migration |
+| `ambient_readiness_report` | Sidecar-to-ambient readiness: migration stage, per-namespace table (pods by capture mode, waypoint, issue counts), every blocker from the revision and ambient checks with its fix, and a cutover checklist; `namespace` filter, paged with `offset` (see [Ambient Readiness](#ambient-readiness)) |
 | `list_files` | List all files in the archive; paged with `offset` |
 | `get_raw_file` | Read any file from the archive, of any size, by byte range (`offset`/`length`) |
 
@@ -132,10 +133,49 @@ The tool extracts actual resource requests from Pod specs when available, fallin
 | `DIAG-004` | Sidecar namespaces whose proxies no Sidecar resource scopes (see below) |
 | `DIAG-005` | Stale or orphaned EnvoyFilters: selectors matching no pod, `targetRefs` to missing Services or Gateway API Gateways (waypoints, gateways), removed filter names, v2 type URLs, `proxyVersion` matching no running proxy. Runs on sidecar, ambient and interop meshes |
 | `DIAG-006` | Control plane or istioctl outside its support window on the capture date (see [Supported Istio Versions](#supported-istio-versions)) |
+| `DIAG-007` | Orphaned revisions, webhooks and tags: injector or validator webhooks whose istiod is gone, namespace revision labels no webhook serves, pods on a revision with no running istiod, leftover revision ConfigMaps and Services, the default revision and the `default` tag pointing at different revisions |
+| `DIAG-008` | Namespaces labelled for ambient and sidecar injection at once (injection wins), sidecar pods left in ambient namespaces, `use-waypoint` on pods that opted out of ambient |
+| `DIAG-009` | AuthorizationPolicies ztunnel enforces whose rules use HTTP attributes (an ALLOW whose rules all need L7 denies everything; a DENY on HTTP attributes does nothing), CUSTOM and AUDIT actions, selector-based RequestAuthentication, WasmPlugin and Telemetry on ambient pods |
+| `DIAG-010` | Egress lockdown ztunnel does not apply: `REGISTRY_ONLY`, Sidecar `egress.hosts` and `outboundTrafficPolicy` covering ambient workloads, ServiceEntry `exportTo`, wildcard ServiceEntries with no egress waypoint |
+| `DIAG-011` | Migration blockers: PeerAuthentication settings ambient drops, VM workloads (WorkloadGroup), SPIRE, primary-remote control planes, nodes ztunnel cannot run on |
+| `DIAG-012` | `istio.io/use-waypoint` naming a waypoint that is missing, not programmed, not allowing the namespace or serving the wrong traffic type; policies with `targetRefs` to a Service no usable waypoint serves; waypoints nothing uses |
+| `DIAG-013` | VirtualService and DestinationRule L7 features (retries, timeouts, faults, mirroring, header changes, routed subsets, consistent hashing, outlier detection, HTTP connection pools) on ambient Services with no waypoint, or on sidecar Services about to move |
+| `DIAG-014` | EnvoyFilters that do nothing or attach to the wrong proxy in ambient: sidecar contexts selecting ambient pods, selector filters aimed at waypoints, `targetRefs` to Services with no waypoint |
+| `DIAG-015` | Ingress traffic from an Istio gateway that skips the Service's waypoint (no `istio.io/ingress-use-waypoint`), so waypoint policy is not applied north-south |
+| `DIAG-016` | Pod capture customizations ambient ignores: `traffic.sidecar.istio.io/*` include and exclude lists, TPROXY, `proxy.istio.io/config`, host-network pods in ambient namespaces |
+| `DIAG-017` | Ambient install consistency: istiod without `PILOT_ENABLE_AMBIENT`, ambient workloads without ztunnel or istio-cni, DaemonSets not ready, istio-cni with ambient off or excluding ambient namespaces, ztunnel pointing at a missing istiod Service |
+| `DIAG-018` | NetworkPolicies selecting ambient pods that block HBONE (TCP 15008) or the kubelet probe SNAT address, with whether a policy engine enforces them |
+| `DIAG-019` | xDS config proxies rejected (NACKs in syncz, istiod `ACK ERROR`, Envoy "rejected" lines, `pilot_total_xds_rejects`), pushes never acknowledged, and xDS messages over the gRPC size limit, with the likely culprit resource |
+| `DIAG-020` | istiod short of capacity: proxies refused by its xDS rate limit, clients per CPU core, OOM kills and restarts, missing `GOMEMLIMIT`, memory request below limit |
+| `DIAG-021` | Conflicts istiod resolves by dropping config (push_status: inbound/outbound listener conflicts, duplicate domains, clusters and subsets, clusters with no endpoints) and Gateways it rejected |
+| `DIAG-022` | Proxy memory pressure on sidecars, gateways, waypoints and ztunnel: istio-proxy OOM kills, worker concurrency above the CPU limit, memory in use near the limit or far above the request |
+| `DIAG-023` | Workload certificates that fail to issue or renew, by CA error class (DNS, refused, expired CA, unauthenticated, deleted service account), with how long proxies went without a valid certificate; xDS client authentication failures |
+| `DIAG-024` | RequestAuthentication JWKS istiod cannot fetch (hosts hashed), fail-closed key sets, and `jwtRules` whose `jwksUri` or issuer cannot work |
+| `DIAG-025` | Gateway TLS credentials missing from `cluster/secrets`, refused across namespaces, expired or mismatched, and SDS load failures |
+| `DIAG-026` | Credentials set as literal env values on istiod, gateways, waypoints and ztunnel (variable names only, never values) |
+| `DIAG-027` | Risky istiod flags (trust-domain validation, debug and xDS-generator auth off, long debounce, ambient status off, deprecated DNS auto-allocation) and plaintext xDS (15010) exposed outside the cluster |
+| `DIAG-028` | TLS origination without server verification: `insecureSkipVerify`, SIMPLE/MUTUAL without a CA where istiod has no fallback, `VERIFY_CERTIFICATE_AT_CLIENT=false`, counted by hashed host domain |
+| `DIAG-029` | mTLS posture (mesh-wide STRICT, PERMISSIVE and DISABLE overrides, namespaces without AuthorizationPolicy) and PeerAuthentication conflicts: several policies on one workload, DestinationRules sending plaintext to STRICT pods, webhooks backed by STRICT pods, port-level settings for ports nothing serves |
+| `DIAG-030` | istio-cni and ztunnel failing on nodes: pods not added to the mesh (with startup-race and rollout-gap timing), ztunnel cut off from the CNI agent, sandbox setup failures, unredirected ambient pods, crash-looping or not-rolled DaemonSet pods, reconcile-on-startup off |
+| `DIAG-031` | ztunnel connection errors grouped by class, direction and destination (policy denials, STRICT against plaintext, HBONE blocked, upstream refusals, xDS size limits), with known noise (health checks, scrapes) ranked last |
+| `DIAG-032` | Severe `istioctl analyze` codes promoted with counts (deny-all-TCP judged against the policy's scope, subsets selecting no pods judged after istiod's DestinationRule merge), codes on generated resources collapsed |
+| `DIAG-033` | Tracing and extension providers that resolve to nothing, provider types Istio dropped, legacy tracers next to Telemetry, trace sampling of 50% or more outside the demo profile, and exporter errors in the logs |
+| `DIAG-034` | Graceful shutdown: termination grace shorter than preStop plus drain, drains `EXIT_ON_ZERO_ACTIVE_CONNECTIONS` ignores, very long drains, app preStop outlasting the sidecar's drain, the pre-1.28 waypoint template's 2 s grace |
+| `DIAG-035` | Protocol selection: server-first ports (MySQL, SMTP and others) without a protocol prefix where Envoy sniffs, ports named for the wrong protocol, Service ports in Istio's reserved range, conflicting Gateway API TLS listeners |
+| `DIAG-036` | Locality load balancing that does nothing because the DestinationRule has no `outlierDetection`, `distribute` weights not summing to 100, nodes without a zone |
+| `DIAG-037` | istiod replicas with no topologySpreadConstraints or podAntiAffinity on a multi-node cluster (warning when the running replicas share a node) |
+
+DIAG-019 to DIAG-037 cover the control plane, security, the ambient data plane and config quality on every mesh; `ambient_readiness_report` does not include them. The log-based ones share one streamed pass over the logs, count only logs of pods still in the pod dump (logs of pods no longer in it are counted and skipped), and cover only the bug report's collection window. Hosts in JWKS and TLS-origination findings are shown as short hashes, and credentials are reported by variable name only.
+
+DIAG-007 runs on every mesh; DIAG-008 only reports when some namespace is labelled ambient. DIAG-009 to DIAG-018 stay quiet on a mesh with no ambient footprint (no ztunnel, no ambient workloads); `ambient_readiness_report` runs them as if a migration were planned. Their severity follows the migration stage: critical when the affected workloads are already ambient (the config is silently not applied), warning ("migration blocker") while they are still sidecars. They are not evaluated when the cluster section they read is missing, and they do not judge namespaces the archive did not collect (`istioctl bug-report --include`).
 
 **DIAG-004** reports coverage per sidecar namespace: a namespace with no Sidecar resource, or with only workload-scoped ones that leave some sidecars unselected. A selector-less Sidecar in the root namespace covers the whole mesh. It is not evaluated when `cluster/crs` is missing, empty or unparsed (Sidecar resources live there), skips ambient namespaces (a Sidecar resource has no effect on ztunnel-captured pods), and is skipped for meshes under 20 sidecar proxies (`SIDECAR_SCOPE_MIN_SIDECARS`), where unscoped config costs little. Only pods whose istio-proxy runs with the `sidecar` role count (not ztunnel pods, whose container is also named istio-proxy); in namespaces the pod dump does not cover (no `cluster/k8s-resources`), sidecars are counted from the proxy dirs. When it fires it also names the egress-gateway and waypoint namespaces that a scoped `egress.hosts` must keep, since leaving them out breaks those paths.
 
 Version checks fall back to pod image tags (`pilot`, `proxyv2`, `ztunnel`, `install-cni`) when the `versions` file is missing or holds an error such as "unable to retrieve Pods"; overview, `get_versions` and the findings say when they did.
+
+## Ambient Readiness
+
+`ambient_readiness_report` answers "what breaks if these workloads move to ambient, and what is already broken in the ambient part": `estimate_resource_savings` says what a migration saves, this says what it costs in configuration work. It starts with the data-completeness verdict and the migration stage (none, planned, partial, ambient), then a table per namespace (capture mode, sidecar / ambient / other pods, the waypoint it binds to, issue counts by severity), then every issue from DIAG-007 to DIAG-018 grouped by check, each with its fix and docs link, and ends with a cutover checklist. On a mesh with no ambient footprint the checks run as if a migration were planned, so the sidecar workloads get the blockers they would hit, as warnings. Pass `namespace` for one namespace; long reports page with `offset`.
 
 ## Large Bug Reports
 
@@ -159,7 +199,7 @@ The EOL check (`DIAG-006`) holds community builds to the [upstream support windo
 
 ## Solo.io Integration
 
-Set `SOLO_MODE=true` to enable integration with Solo.io internal tools (docs, KB, support agent, Zendesk, Slack) for enriched analysis.
+For Solo.io employees. Set `SOLO_MODE=true` and the server tells the MCP client, in its instructions, to enrich the analysis with the Solo-internal Claude plugins when they are connected: Customer360, the Solo knowledge base, the support agent and migration assessment. Solo mode adds no analysis of its own, and without those plugins nothing changes.
 
 ## Development
 
