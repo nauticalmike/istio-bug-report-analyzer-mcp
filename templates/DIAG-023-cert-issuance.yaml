@@ -1,0 +1,79 @@
+id: DIAG-023
+name: Workload Certificate Issuance Failures
+category: security
+severity: critical
+description: >
+  Proxies, ztunnel or istiod log that workload certificates are not being issued: the
+  istio-agent cannot get a certificate from the CA, ztunnel has no valid certificate for
+  an identity, or istiod (the CA server) rejects the requests. Proxies are counted in failed
+  CSR attempts (one per attempt, whatever the number of lines it logs; gRPC retry lines are
+  not counted), grouped by CA error class (DNS, connection refused, expired certificate,
+  Unauthenticated, sign failure, GOAWAY, timeout), and a proxy that logged "generated new
+  workload certificate" after its last failure is reported as recovered. A failure episode runs
+  from its first failure (or "ca request failed, starting attempt" retry) to the next issued
+  certificate; when the pod already had a certificate, a renewal that took as long as the
+  remaining lifetime (certificate TTL x SECRET_GRACE_PERIOD_RATIO, defaults 24h and 0.5, TTL
+  read from the ttl= of the issued lines) or longer, per the latency= of the next issued line,
+  means the certificate expired before it was renewed. An expired workload certificate in a
+  proxy's certs dump is reported too. ztunnel prefetch failures are judged per identity.
+  istiod impersonation failures are grouped by the reason istiod logs; client-authentication
+  rejections (shared by xDS and the CA) are worded separately, deleted service accounts with
+  the still-failing proxies that run as them.
+rootCause: >
+  The CA (istiod, or an external CA when ENABLE_CA_SERVER=false) is unreachable, overloaded
+  or misconfigured; the pod's service account token is invalid (the pod or service account
+  it was bound to was deleted); istiod refuses ztunnel's impersonation (the ztunnel service
+  account is not in CA_TRUSTED_NODE_ACCOUNTS, or istiod does not see the requesting pod or
+  the workloads on its node); or the CA cannot sign (expired or broken cacerts).
+impact: >
+  Critical while workloads keep failing at the end of their log (several attempts over a
+  minute or more): a proxy without a workload certificate cannot accept or open mTLS
+  connections, and an ambient workload without one cannot send or receive mesh traffic. A
+  warning for failures over 5 minutes (or 10+ attempts) before a certificate was issued, or a
+  recent failure with no certificate since; info for a short startup race (or renewal retry)
+  that then succeeded. A certificate that expired before renewal is critical while the proxy
+  still has none at the end of its log, or when 10 or more proxies were affected, else a
+  warning: mTLS to and from the proxy failed in that window. ztunnel prefetch failures are
+  critical only when the same identity fails over more than a minute or is still without a
+  certificate while its pod is live; a single line for a pod no longer in the dump is info.
+  Logs of pods no longer in the pod dump are not counted.
+signals:
+  # cert_issuance in src/diagnostics/mesh-checks/security-certs.ts:
+  # - not evaluated when no proxy, ztunnel or istiod log was collected, or every collected
+  #   log is of a pod no longer in the pod dump; a note on ignored stale logs alone is no finding;
+  # - "partial" (info) when no proxy logs were collected (istiod or ztunnel logs only);
+  # - log lines are bounded by the bug report's --duration: none is "not in the window";
+  # - an info line adds CA context (ENABLE_CA_SERVER=false, number of istiod replicas).
+  - source:
+      type: mesh_check
+      check: cert_issuance
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Check istiod (or the external CA) logs and health first: istioctl proxy-status, the
+      istiod citadel_server_* metrics, and kubectl -n istio-system logs deploy/istiod | grep
+      -i -e csr -e impersonation. Scale istiod if it is saturated.
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      For impersonation failures, check CA_TRUSTED_NODE_ACCOUNTS on istiod (it must name the
+      ztunnel namespace/service account) and that istiod watches the cluster of the requesting
+      ztunnel; restart pods whose service account token was invalidated (deleted and recreated
+      service accounts); for a deleted service account (serviceaccounts "<name>" not found),
+      recreate it (or fix the workload's serviceAccountName) and restart its pods.
+    effort: medium
+    risk: medium
+  - order: 3
+    description: >-
+      Check the CA certificate: kubectl -n istio-system get secret cacerts, its expiry, and
+      that the intermediate chains to the root the mesh trusts.
+    effort: medium
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/ops/diagnostic-tools/proxy-cmd/"
+  - "https://istio.io/latest/docs/tasks/security/cert-management/plugin-ca-cert/"
+enrichmentHints:
+  docsQuery: "istio workload certificate CSR signing failed ztunnel certificate fetch"

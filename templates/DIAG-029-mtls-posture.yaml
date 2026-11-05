@@ -1,0 +1,69 @@
+id: DIAG-029
+name: mTLS Posture and PeerAuthentication Conflicts
+category: security
+severity: warning
+description: >
+  One info line summarizes how far the mesh is from mesh-wide STRICT mTLS with authorization
+  everywhere: no root-namespace STRICT PeerAuthentication, PERMISSIVE overrides, DISABLE
+  (whole policy or port), DestinationRules that turn TLS off toward mesh Services, and
+  namespaces with mesh workloads and no AuthorizationPolicy. A mesh at that baseline gets no
+  line. Separate lines report PeerAuthentication conflicts: several policies selecting the same
+  workload, port-level settings that never apply, DestinationRules that send plaintext to
+  workloads that require mTLS (on the Service's target port, named ports resolved, only when a
+  sidecar, gateway or waypoint client is in the dump), and admission webhook or CRD conversion
+  Services the kube-apiserver calls whose pods require mTLS. Backends that are ztunnel-captured
+  are not counted for a DestinationRule DISABLE while Envoy clients send HBONE
+  (PILOT_ENABLE_SENDING_HBONE, on by default with PILOT_ENABLE_AMBIENT), and target ports a
+  sidecar does not capture (traffic.sidecar.istio.io/excludeInboundPorts, or not in
+  includeInboundPorts) are skipped; a webhook whose calls all have failurePolicy Ignore is
+  info (the calls are skipped silently). PeerAuthentications written by a controller
+  (ownerReferences) are collapsed per generator.
+rootCause: >
+  istiod applies only the oldest workload PeerAuthentication that selects a pod; portLevelMtls
+  is read only from workload (selector) policies and is keyed by container port, not Service
+  port; a DestinationRule tls.mode DISABLE makes sidecar, gateway and waypoint clients send
+  plaintext even to STRICT workloads (ztunnel ignores DestinationRule TLS); the kube-apiserver
+  is not in the mesh, so it cannot call a webhook on a STRICT port.
+impact: >
+  Plaintext accepted where STRICT was intended (or the reverse), and requests that fail with
+  connection resets when a client sends plaintext to a STRICT workload.
+signals:
+  # mtls_posture in src/diagnostics/mesh-checks/security-posture.ts (the PeerAuthentication
+  # model of src/diagnostics/peer-authentication.ts):
+  # - the posture summary is info and mesh-wide (no namespace);
+  # - portLevelMtls on a selector-less policy is reported here only while the mesh has no
+  #   ambient footprint: from then on DIAG-011 reports it;
+  # - not evaluated without cluster/crs.
+  - source:
+      type: mesh_check
+      check: mtls_posture
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Migrate to mesh-wide STRICT: a selector-less PeerAuthentication in the root namespace
+      with mtls.mode STRICT, after checking that no plaintext clients remain (istio_requests_total
+      with connection_security_policy="none").
+    yaml: |
+      apiVersion: security.istio.io/v1
+      kind: PeerAuthentication
+      metadata:
+        name: default
+        namespace: istio-system
+      spec:
+        mtls:
+          mode: STRICT
+    effort: medium
+    risk: medium
+  - order: 2
+    description: >-
+      Keep one workload PeerAuthentication per workload, key portLevelMtls by the container
+      (target) port, and remove DestinationRule tls DISABLE overrides toward mesh Services.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/tasks/security/authentication/mtls-migration/"
+  - "https://istio.io/latest/docs/reference/config/security/peer_authentication/"
+enrichmentHints:
+  docsQuery: "PeerAuthentication STRICT migration portLevelMtls"

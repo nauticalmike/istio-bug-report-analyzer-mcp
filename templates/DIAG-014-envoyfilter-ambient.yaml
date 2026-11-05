@@ -1,0 +1,54 @@
+id: DIAG-014
+name: EnvoyFilter Inert or Misattached in Ambient
+category: envoyfilter
+severity: critical
+# Complements DIAG-005, which keeps "selects no pod" and "targetRef does not exist"; this
+# check only reports filters that select or target something. Returns nothing on a mesh
+# with no ambient footprint.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  EnvoyFilters that do nothing in ambient mode: workloadSelector or namespace-wide filters
+  with a sidecar context that select ambient pods (no Envoy), workloadSelector or
+  namespace-wide filters that would reach waypoint pods (waypoints take only targetRefs),
+  targetRefs to Services with no usable waypoint, waypoint-targeted filters whose patches all
+  use the GATEWAY context, and GatewayClass targetRefs outside the root namespace. Patches
+  whose proxyVersion matches no running proxy are ignored. Root-namespace filters that only
+  insert Istio telemetry (stats, metadata exchange) are info: ztunnel and waypoints build that
+  in. Each filter is described by what its patches do (inserts, modifies, removes). Sidecar-
+  context filters that sidecar pods rely on are reported as migration blockers while the mesh
+  is planned or partial.
+rootCause: >
+  ztunnel has no Envoy, so per-pod EnvoyFilters have nothing to patch. Waypoints attach
+  EnvoyFilters only through targetRefs (a Service they serve, their Gateway, or the
+  istio-waypoint GatewayClass from the root namespace) and apply the SIDECAR_INBOUND and
+  SIDECAR_OUTBOUND contexts, not GATEWAY.
+impact: >
+  The customization the filter provided (Lua, ext_authz, rate limits, transcoding,
+  compression) silently stops applying when the workload is, or moves to, ambient.
+signals:
+  - source:
+      type: mesh_check
+      check: envoyfilter_ambient
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Prefer first-class APIs: HTTPRoute filters, WasmPlugin with targetRefs, Telemetry, AuthorizationPolicy, RequestAuthentication"
+    effort: high
+    risk: medium
+  - order: 2
+    description: "Where an EnvoyFilter is still needed at a waypoint, attach it with targetRefs (the waypoint-bound Service or the waypoint Gateway) and a SIDECAR_INBOUND context; EnvoyFilter is not a supported API at waypoints, so test after every upgrade"
+    effort: medium
+    risk: medium
+  - order: 3
+    description: "Keep workloads that depend on a sidecar EnvoyFilter on sidecars (interop) until the filter is replaced"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/migrate/migrate-policies/"
+  - "https://istio.io/latest/docs/reference/config/networking/envoy-filter/"
+enrichmentHints:
+  docsQuery: "EnvoyFilter waypoint targetRefs ambient"

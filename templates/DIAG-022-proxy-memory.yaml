@@ -1,0 +1,69 @@
+id: DIAG-022
+name: Proxy Memory Pressure
+category: performance
+severity: critical
+description: >
+  Istio proxies (sidecars, gateways, waypoints, ztunnel) are running out of memory or are
+  sized against it (see Affected): istio-proxy containers last terminated OOMKilled; Envoy
+  running more worker threads than its CPU limit, or 8 or more with no limit; memory in use
+  (the proxy's /memory) at 85% or more of the limit, or more than twice the request. One
+  line per proxy kind and pattern, with counts, the limits seen and up to five examples.
+rootCause: >
+  Envoy's memory grows with the config it holds (every cluster, listener and route istiod
+  sends it, which without Sidecar or exportTo scoping is the whole mesh) and with its worker
+  threads (each keeps its own connection pools and caches). Limits copied from defaults, a
+  concurrency of 0 on a large node, and a mesh that grew without scoping push proxies over
+  their limits; requests far below use overcommit nodes.
+impact: >
+  An OOM kill drops every connection the proxy carries; for a gateway, waypoint or ztunnel
+  that is every workload behind it (critical), for a sidecar its own pod (warning). Proxies
+  near the limit fail under a burst or a large push. Requests below use get pods evicted
+  first under node memory pressure (info).
+signals:
+  # proxy_memory in src/diagnostics/mesh-checks/proxy-memory.ts:
+  # - OOMKilled: lastState.terminated.reason of the istio-proxy container (regular or native
+  #   sidecar), per kind; critical for gateways, waypoints and ztunnel, warning for sidecars;
+  # - concurrency (server_info): above ceil(CPU limit) warning (limit from the pod spec; only
+  #   for a pod missing from the pod dump pilot-agent's "cpu limit detected as N" log line,
+  #   which is the limit or, with none set, node allocatable: ISTIO_CPU_LIMIT is a
+  #   resourceFieldRef on limits.cpu); >= 8 with no CPU limit, or an unknown one (pod not in
+  #   the pod dump; the line says whether no proxy log was collected or the log has no such
+  #   line), info unless memory is high (then warning);
+  # - OOM remediation per kind (ztunnel: DaemonSet resources and discoverySelectors);
+  # - /memory in use (total_physical_bytes, else heap_size - pageheap_unmapped, else
+  #   allocated): >= 85% of the limit warning; > 2x the request and >= 64 MiB above it info;
+  # - one line per kind and pattern, five examples; cluster counts are not computed;
+  # - not evaluated with no pod dump and no proxy server_info or memory.
+  - source:
+      type: mesh_check
+      check: proxy_memory
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Cut the config each proxy holds: a Sidecar resource per namespace (or a mesh-wide
+      default in the root namespace) with only the hosts it calls, and exportTo on Services,
+      VirtualServices and DestinationRules. This lowers memory on every proxy at once.
+    effort: medium
+    risk: medium
+  - order: 2
+    description: >-
+      Size the proxies that are short: per pod with the sidecar.istio.io/proxyMemory and
+      proxyMemoryLimit annotations, mesh-wide with global.proxy.resources, and for gateways
+      and waypoints in their Deployment or Gateway parameters. Set concurrency to the CPU
+      limit (proxy.istio.io/config: '{"concurrency": 2}').
+    command: "kubectl annotate deploy <name> -n <ns> --overwrite sidecar.istio.io/proxyMemoryLimit=1Gi   # applied on the next rollout"
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      Check the current use of one proxy before and after.
+    command: "kubectl exec -n <ns> <pod> -c istio-proxy -- pilot-agent request GET memory"
+    effort: trivial
+    risk: none
+references:
+  - "https://istio.io/latest/docs/ops/deployment/performance-and-scalability/"
+  - "https://istio.io/latest/docs/reference/config/networking/sidecar/"
+enrichmentHints:
+  docsQuery: "istio-proxy OOMKilled memory limit concurrency Sidecar resource scoping"

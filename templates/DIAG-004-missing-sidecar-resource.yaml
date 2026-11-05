@@ -31,11 +31,12 @@ remediation:
   - order: 1
     description: >-
       Create a default Sidecar in the root namespace (or one per namespace listed under
-      Affected) that limits egress to the namespace itself and the control plane. Before
-      applying it, add every namespace the workloads call: in particular egress-gateway
-      namespaces and waypoint namespaces (listed under Affected when the archive shows
-      them). Leaving them out sends that traffic to the passthrough or blackhole cluster
-      and breaks egress-gateway and sidecar-to-waypoint paths.
+      Affected) that limits egress to the namespace itself and the mesh root namespace
+      (meshConfig.rootNamespace, istio-system by default, where the control plane runs).
+      Before applying it, add every namespace the workloads call: in particular
+      egress-gateway namespaces and waypoint namespaces (listed under Affected when the
+      archive shows them). Leaving them out sends that traffic to the passthrough or
+      blackhole cluster and breaks egress-gateway and sidecar-to-waypoint paths.
     yaml: |
       apiVersion: networking.istio.io/v1
       kind: Sidecar
@@ -46,7 +47,7 @@ remediation:
         egress:
           - hosts:
               - "./*"
-              - "istio-system/*"
+              - "istio-system/*"   # the root namespace
               # Add the egress-gateway and waypoint namespaces, and any other namespace
               # these workloads call, e.g.:
               # - "istio-egress/*"

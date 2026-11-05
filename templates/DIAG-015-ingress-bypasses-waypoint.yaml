@@ -1,0 +1,62 @@
+id: DIAG-015
+name: Ingress Traffic Bypasses the Waypoint
+category: ambient
+severity: critical
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Waypoint-bound Services with policy or routes at their waypoint are backends of an ingress
+  gateway (an Istio Gateway with a VirtualService, delegates followed, or a Gateway API route
+  whose parent is a Gateway), but ingress traffic is not sent through the waypoint. For Istio
+  gateways (networking.istio.io, or a GatewayClass with controllerName
+  istio.io/gateway-controller): istio.io/ingress-use-waypoint is not true on the Service or its
+  namespace, the namespace label is set on a control plane older than 1.25, or istiod
+  disables ENABLE_INGRESS_WAYPOINT_ROUTING. For other controllers: a gateway ztunnel captures
+  bypasses a waypoint-for service waypoint when it addresses pod IPs (warning; waypoint-for
+  all or workload is reached anyway), and a gateway outside the mesh is info. kgateway honors
+  istio.io/ingress-use-waypoint when its controller sets KGW_INGRESS_USE_WAYPOINTS=true.
+rootCause: >
+  istio.io/use-waypoint governs east-west traffic only. Gateways send to the destination's
+  waypoint only when istio.io/ingress-use-waypoint=true (Service label first, then namespace;
+  the namespace label from Istio 1.25) and ENABLE_INGRESS_WAYPOINT_ROUTING is on; otherwise
+  they go straight to the endpoints. Other controllers follow the label only if they implement
+  it (kgateway does, behind KGW_INGRESS_USE_WAYPOINTS); a captured gateway that sends to pod
+  IPs reaches only a waypoint that serves workload traffic.
+impact: >
+  North-south requests skip the waypoint's AuthorizationPolicies, routing and telemetry:
+  L7 authorization enforced for mesh clients is bypassed from the internet.
+signals:
+  - source:
+      type: mesh_check
+      check: ingress_bypasses_waypoint
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Before sending ingress through the waypoint, allow the gateway's identity (its service account principal) in the AuthorizationPolicies the waypoint enforces, or the waypoint will deny ingress traffic"
+    effort: low
+    risk: medium
+  - order: 2
+    description: "Label the Service (or, on 1.25+, its namespace) so ingress traffic goes through the waypoint; for kgateway also set KGW_INGRESS_USE_WAYPOINTS=true on its controller"
+    command: "kubectl label service <service> -n <namespace> istio.io/ingress-use-waypoint=true"
+    effort: trivial
+    risk: low
+  - order: 3
+    description: "If istiod sets ENABLE_INGRESS_WAYPOINT_ROUTING=false, remove it (it defaults to true with ambient enabled)"
+    effort: low
+    risk: low
+  - order: 4
+    description: "For a third-party gateway ztunnel captures, set istio.io/waypoint-for=all on the waypoint or route it to the Service VIP"
+    effort: low
+    risk: low
+  - order: 5
+    description: "Or enforce the same authorization at the ingress gateway, and restrict the backends to the waypoint and gateway identities with an L4 AuthorizationPolicy"
+    effort: medium
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/ambient/usage/waypoint/"
+  - "https://istio.io/latest/docs/reference/config/labels/#IoIstioIngressUseWaypoint"
+enrichmentHints:
+  docsQuery: "ingress-use-waypoint ingress gateway waypoint"

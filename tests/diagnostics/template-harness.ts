@@ -70,6 +70,11 @@ export async function buildStore(spec: ArchiveSpec): Promise<BugReportStore> {
   return BugReportStore.fromDirectory(archiveDir);
 }
 
+/** Replaces the parsed cluster resources of a loaded store (synthetic, no YAML round trip). Call before any lookup. */
+export function injectResources(store: BugReportStore, items: Obj[]): void {
+  (store as unknown as { clusterResources: unknown }).clusterResources = items;
+}
+
 /** Builds a minimal archive per spec and runs the shipped templates; the engine keeps the run's not-evaluated list. */
 export async function runEngine(spec: ArchiveSpec, categories: string[]): Promise<{ findings: DiagnosticFinding[]; engine: DiagnosticEngine }> {
   const store = await buildStore(spec);

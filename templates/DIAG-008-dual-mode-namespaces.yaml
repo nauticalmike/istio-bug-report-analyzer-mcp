@@ -1,0 +1,65 @@
+id: DIAG-008
+name: Dual-Mode Namespaces and Ambient Injection Conflicts
+category: sidecar-to-ambient
+severity: warning
+# All modes: data plane mode detection can call a mesh with a few ambient namespaces
+# "sidecar". The check returns nothing when no namespace is labelled ambient.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Ambient namespaces conflict with sidecar injection. The entries under Affected name a
+  namespace labelled istio.io/dataplane-mode=ambient that also carries an injection label
+  (istio-injection=enabled or istio.io/rev, IST0123) that an injector webhook serves, a
+  stale injection label on an ambient namespace that no injector webhook serves (info: it
+  injects nothing, but should be removed), pods in ambient namespaces that still
+  run a sidecar, pods opted into a sidecar by label, or pods opted out of ambient
+  (istio.io/dataplane-mode=none) that carry an istio.io/use-waypoint label.
+rootCause: >
+  The sidecar injector does not look at istio.io/dataplane-mode, and istio-cni skips every
+  pod that has a sidecar. A namespace moved to ambient without removing its injection label
+  keeps injecting sidecars, and pods created before the move keep theirs until restarted.
+impact: >
+  Pods with a sidecar are not captured by ztunnel: they get none of the ambient behaviour
+  the namespace was moved for (waypoint L7 policy, ztunnel L4 policy for that pod), and
+  sidecar-era scoping stays in effect. The namespace looks migrated while its traffic is not.
+signals:
+  # dual_mode_namespaces in src/diagnostics/mesh-checks/revisions.ts. Whether a label injects
+  # is decided by the injector webhooks' selectors (mesh-model namespaceMode); without any
+  # webhook in the archive the label rule stands in. Not evaluated without
+  # Namespace objects, or when the pod dump covers no ambient namespace (cluster/pods only).
+  - source:
+      type: mesh_check
+      check: dual_mode_namespaces
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Remove the injection labels from ambient namespaces (istio-injection and, unless you
+      rely on it for revision selection without injection, istio.io/rev).
+    command: "kubectl label namespace <ns> istio-injection- istio.io/rev-"
+    effort: low
+    risk: medium
+  - order: 2
+    description: >-
+      Restart the workloads that still run a sidecar so they come up without one and
+      ztunnel captures them; verify that the pods are 1/1 and show
+      ambient.istio.io/redirection=enabled.
+    command: "kubectl rollout restart deployment -n <ns> && istioctl ztunnel-config workloads"
+    effort: medium
+    risk: medium
+  - order: 3
+    description: >-
+      Keep a workload on a sidecar only on purpose (sidecar.istio.io/inject=true); remove
+      istio.io/use-waypoint from pods labelled istio.io/dataplane-mode=none, or enroll them
+      in ambient if they should use the waypoint.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/add-workloads/"
+  - "https://istio.io/latest/docs/ambient/migrate/"
+  - "https://istio.io/latest/docs/reference/config/analysis/ist0123/"
+enrichmentHints:
+  docsQuery: "ambient mode namespace sidecar injection label conflict"

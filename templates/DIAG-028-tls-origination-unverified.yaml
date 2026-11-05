@@ -1,0 +1,49 @@
+id: DIAG-028
+name: TLS Origination Without Server Verification
+category: security
+severity: warning
+description: >
+  DestinationRule TLS settings (trafficPolicy, portLevelSettings or subsets) that do not
+  verify the server certificate: insecureSkipVerify on SIMPLE or MUTUAL, or SIMPLE/MUTUAL
+  without caCertificates or credentialName on a control plane that does not fall back to the
+  OS CA bundle (before 1.21, or 1.21 to 1.23 with VERIFY_CERTIFICATE_AT_CLIENT=false). One
+  line per kind of problem, with counts by hashed host domain (host#1a2b) and the number of
+  generated copies of the same DestinationRule, instead of a line per object.
+rootCause: >
+  insecureSkipVerify set to get past a certificate error, or TLS origination written before
+  istiod verified against the OS CA bundle by default. insecureSkipVerify with ISTIO_MUTUAL
+  does not turn verification off: istiod still validates mesh certificates against the mesh
+  root, except that from 1.30 it turns off automatic SAN validation on Dynamic Forward Proxy
+  clusters (wildcard ServiceEntry hosts with DYNAMIC_DNS); reported as info.
+impact: >
+  A proxy that does not verify the upstream certificate sends requests, and any client
+  credentials, to whoever answers for the host (man in the middle).
+signals:
+  # tls_origination_unverified in src/diagnostics/mesh-checks/security-posture.ts:
+  # - DestinationRules in cluster/crs; control plane version from the versions file;
+  #   VERIFY_CERTIFICATE_AT_CLIENT from the istiod env (default false before 1.21, true in
+  #   1.21-1.23, removed in 1.24);
+  # - not evaluated without cluster/crs.
+  - source:
+      type: mesh_check
+      check: tls_origination_unverified
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Remove insecureSkipVerify and give the CA that signed the server certificate
+      (caCertificates, or a credentialName Secret with ca.crt), plus subjectAltNames or sni.
+    yaml: |
+      trafficPolicy:
+        tls:
+          mode: SIMPLE
+          sni: <host>
+          credentialName: <secret-with-ca.crt>
+    effort: low
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/ops/best-practices/security/#configure-tls-verification-in-destination-rule-when-using-tls-origination"
+  - "https://istio.io/latest/docs/reference/config/networking/destination-rule/#ClientTLSSettings"
+enrichmentHints:
+  docsQuery: "DestinationRule insecureSkipVerify caCertificates TLS origination"

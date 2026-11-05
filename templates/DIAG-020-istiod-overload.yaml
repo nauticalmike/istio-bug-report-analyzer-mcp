@@ -1,0 +1,82 @@
+id: DIAG-020
+name: Istiod Overloaded or Undersized
+category: performance
+severity: critical
+description: >
+  istiod shows signs that it cannot keep up with its proxies or is sized below its load (see
+  Affected): proxies refused by its xDS request rate limit (ResourceExhausted "request rate
+  limit exceeded" in proxy or ztunnel logs); more xDS clients per CPU core than Istio's
+  reference load; discovery containers OOMKilled or restarting repeatedly; a memory limit
+  without GOMEMLIMIT on istiod older than 1.29; or a memory request below the limit.
+  Replica count and the HPA floor are reported by DIAG-003, replicas not spread across
+  nodes or zones by DIAG-037.
+rootCause: >
+  istiod's CPU and memory grow with the number of proxies it serves and the amount of
+  config each one receives. Requests copied from a demo or default profile, a CPU limit
+  that throttles pushes, a memory limit the Go runtime does not know about, and a mesh that
+  grew without resizing the control plane all leave a replica short of headroom, which
+  shows first during a full push or a reconnect storm (node drains, istiod restarts).
+impact: >
+  Critical when proxies are refused config (they start or reconnect without it), when
+  replicas are OOM-killed (pushes stop and every proxy reconnects to the survivors, which
+  can cascade), or when clients per core are far past the reference. Below that, config
+  changes and new pods take longer to converge.
+signals:
+  # istiod_overload in src/diagnostics/mesh-checks/istiod-overload.ts:
+  # - rate limit: one mesh-wide line (proxy and ztunnel logs, istiod's "exceeded rate limit"):
+  #   critical when 20+ proxies were refused within 5 minutes or istiod logged refusals, and
+  #   not every refused proxy is back; a proxy is back when syncz lists it at collection, or
+  #   when it logged "connected to (delta) upstream XDS server" (ztunnel: "Stream established")
+  #   after its last refusal; info when all are back and the burst followed an istiod start
+  #   (within 120 s) or at most 2 proxies were refused, warning otherwise; DIAG-003 named for
+  #   1 replica;
+  # - istiod debug dirs of pods no longer in the pod dump are not counted in a live
+  #   Deployment's replicas;
+  # - clients per core: adsz totalClients (else syncz entries, else the pod dump's istio-proxy
+  #   pods when one istiod Deployment serves the mesh, at most warning) per istiod pod, summed
+  #   per Deployment, over the CPU limit: warning above 2,000 per core, critical above 8,000;
+  #   with no CPU limit only info (against the request); meshes under 200 clients not judged;
+  # - memory quantities are printed as the spec writes them;
+  # - OOMKilled (lastState) critical; 3+ restarts without OOM warning; per Deployment;
+  # - GOMEMLIMIT: warning only with a memory limit, istiod < 1.29 (1.29+ sets it itself);
+  # - memory request below limit: info;
+  # - a "partial" info line when only pod specs were judged (no syncz/adsz, no proxy logs);
+  # - not evaluated with no istiod workload in the dump, no syncz and no proxy logs.
+  - source:
+      type: mesh_check
+      check: istiod_overload
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Size the discovery container for the load: at least 1 vCPU per ~2,000 proxies of
+      request, no CPU limit (or a generous one), and a memory request equal to the limit.
+      With the istiod Helm chart these are the resources values (pilot.resources up to 1.23).
+    command: "helm upgrade <istiod-release> istio/istiod -n istio-system --reuse-values --set resources.requests.cpu=2 --set resources.requests.memory=4Gi --set resources.limits.memory=4Gi"
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Reduce what each replica holds: discoverySelectors in meshConfig to ignore namespaces
+      outside the mesh, and Sidecar resources (or exportTo) to scope config. Memory is per
+      replica: adding replicas spreads connections and CPU, not config size.
+    effort: medium
+    risk: medium
+  - order: 3
+    description: >-
+      If proxies hit the xDS rate limit during reconnect storms after the above, raise
+      PILOT_MAX_REQUESTS_PER_SECOND on istiod (0 or unset sizes it from the machine).
+    effort: low
+    risk: low
+  - order: 4
+    description: >-
+      On istiod older than 1.29 with a memory limit, set GOMEMLIMIT from limits.memory
+      (valueFrom.resourceFieldRef), as the istiod chart does, or upgrade.
+    effort: trivial
+    risk: none
+references:
+  - "https://istio.io/latest/docs/ops/deployment/performance-and-scalability/"
+  - "https://istio.io/latest/docs/ops/configuration/mesh/configuration-scoping/"
+enrichmentHints:
+  docsQuery: "istiod resources scaling OOMKilled PILOT_MAX_REQUESTS_PER_SECOND discoverySelectors"

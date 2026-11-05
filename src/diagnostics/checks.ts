@@ -10,6 +10,16 @@ export interface Issue {
    * (never above the template's severity), e.g. an old istioctl client alone is only info.
    */
   severity?: Severity;
+  /**
+   * The namespace the issue is about, when it is about one (mesh-wide items leave it unset).
+   * The readiness report counts and filters issues by it.
+   */
+  namespace?: string;
+  /**
+   * The namespaces a merged line covers (one object copied into several namespaces, a group
+   * spanning namespaces). The readiness report counts and filters the line under each.
+   */
+  namespaces?: string[];
 }
 
 export type Severity = "critical" | "warning" | "info";
@@ -44,10 +54,67 @@ function istiodDeployments(store: BugReportStore): ParsedResource[] {
 
 const istiodOrder = new WeakMap<BugReportStore, IstiodInfo[]>();
 
+export type PodLiveness = "live" | "stale" | "unknown";
+
+interface LivenessIndex {
+  /** No usable pod list: every answer is "unknown". */
+  unknown: boolean;
+  /** "namespace/name" of every pod in the dump, whatever its phase. */
+  keys: Set<string>;
+  /** Pod names, for cni/<pod> logs (no namespace in the path). */
+  names: Set<string>;
+  /** The dump lists an istio-cni pod. */
+  cniListed: boolean;
+  namespaces: Set<string>;
+}
+
+/** Per store: the pod lookups podLiveness answers from, built once from the pod inventory. */
+const livenessIndexes = new WeakMap<BugReportStore, LivenessIndex>();
+
+function livenessIndex(store: BugReportStore): LivenessIndex {
+  const cached = livenessIndexes.get(store);
+  if (cached) return cached;
+  const inv = store.getPodInventory();
+  const unknown = !inv.available || inv.gaveUp.some((g) => g.startsWith("cluster/k8s-resources:") || !inv.wholeCluster);
+  const index: LivenessIndex = { unknown, keys: new Set(), names: new Set(), cniListed: false, namespaces: inv.namespaces };
+  if (!unknown) {
+    for (const [key, p] of inv.pods) {
+      index.keys.add(key);
+      index.names.add(p.name);
+      if (p.daemon === "cni") index.cniListed = true;
+    }
+  }
+  livenessIndexes.set(store, index);
+  return index;
+}
+
+/**
+ * Whether a pod an archive directory (or log) belongs to is still in the pod dump: "stale"
+ * when the dump lacks it while covering its namespace (replaced before collection, or another
+ * cluster's pod in a merged archive); "live" when the dump has it, whatever its phase (a Failed
+ * or Succeeded pod's logs are of this cluster and this collection); "unknown" without a pod
+ * list, with one the scan gave up on, or for a namespace the dump holds nothing from
+ * (cluster/pods alone covers only the Istio namespace). A namespace of null (cni/<pod>) matches
+ * the pod by name in any namespace and is covered when the dump lists any istio-cni pod.
+ * Lookups are precomputed per store.
+ */
+export function podLiveness(store: BugReportStore, namespace: string | null, name: string): PodLiveness {
+  const index = livenessIndex(store);
+  if (index.unknown) return "unknown";
+  if (namespace === null) {
+    if (index.names.has(name)) return "live";
+    return index.cniListed ? "stale" : "unknown";
+  }
+  if (index.keys.has(`${namespace}/${name}`)) return "live";
+  return index.namespaces.has(namespace) ? "stale" : "unknown";
+}
+
 /**
  * istiod pods, the one serving the most proxies (debug/syncz entries) first; pods without
  * syncz keep their order after those with it. In multi-revision archives the first istiod
- * listed can be an idle revision, whose debug data says nothing about the live mesh.
+ * listed can be an idle revision, whose debug data says nothing about the live mesh. Pods no
+ * longer in the pod dump (podLiveness "stale": a replaced pod, or another cluster's istiod in a
+ * merged archive) come after every other pod.
  */
 export function istiodsByLoad(store: BugReportStore): IstiodInfo[] {
   const cached = istiodOrder.get(store);
@@ -57,28 +124,107 @@ export function istiodsByLoad(store: BugReportStore): IstiodInfo[] {
     const syncz = p.debugEndpoints.get("syncz");
     return Array.isArray(syncz) ? syncz.length : 0;
   };
-  const ordered = store.getIstiodPods().map((p) => ({ p, n: load(p) })).sort((a, b) => b.n - a.n).map(({ p }) => p);
+  const ordered = store
+    .getIstiodPods()
+    .map((p) => ({ p, stale: podLiveness(store, p.namespace, p.podName) === "stale", n: load(p) }))
+    .sort((a, b) => Number(a.stale) - Number(b.stale) || b.n - a.n)
+    .map(({ p }) => p);
   istiodOrder.set(store, ordered);
   return ordered;
 }
 
-/** MeshConfig from the busiest istiod's debug/mesh endpoint, else the `istio` ConfigMap's `mesh` key. */
-export function meshConfig(store: BugReportStore): Obj | null {
-  for (const pod of istiodsByLoad(store)) {
-    const mesh = obj(pod.debugEndpoints.get("mesh"));
-    if (mesh) return mesh;
+/**
+ * Enums inside MeshConfig messages whose zero value protojson (istiod debug/mesh) omits, so a
+ * message present without the field means that value (istio/api mesh/v1alpha1/config.proto):
+ * `"outboundTrafficPolicy": {}` is REGISTRY_ONLY, not unset. Only applied when the message is
+ * present; an absent message keeps meaning "default".
+ */
+const ZERO_ENUMS: { message: string; field: string; zero: string }[] = [
+  { message: "outboundTrafficPolicy", field: "mode", zero: "REGISTRY_ONLY" },
+  { message: "inboundTrafficPolicy", field: "mode", zero: "PASSTHROUGH" },
+];
+
+function withZeroEnums(mesh: Obj): Obj {
+  let out = mesh;
+  for (const { message, field, zero } of ZERO_ENUMS) {
+    const m = obj(out[message]);
+    if (!m || m[field] !== undefined) continue;
+    out = { ...out, [message]: { ...m, [field]: zero } };
   }
-  // `istio` for the default revision, `istio-<rev>` for revisioned installs.
+  return out;
+}
+
+/** The revision an istiod object serves: its istio.io/rev label, "default" without one. */
+function revisionOf(r: ParsedResource): string {
+  return r.metadata.labels?.["istio.io/rev"] ?? "default";
+}
+
+/**
+ * The mesh ConfigMaps (`istio` for the default revision, `istio-<rev>` for revisioned installs)
+ * best first: the revision with the most running istiod pods in the pod dump, then the most
+ * Deployment replicas, then `istio` before `istio-<rev>` in dump order. A revision whose istiod
+ * Deployment is scaled to 0 (left after a canary upgrade) comes last.
+ */
+function meshConfigMaps(store: BugReportStore): ParsedResource[] {
   const meshOf = (c: ParsedResource) => obj((c as unknown as Obj).data)?.mesh;
   const cms = store.getClusterResources({ kind: "ConfigMap" }).filter((c) => typeof meshOf(c) === "string");
-  const cm = cms.find((c) => c.metadata.name === "istio") ?? cms.find((c) => /^istio-[\w-]+$/.test(c.metadata.name));
-  const raw = cm ? meshOf(cm) : undefined;
+  const named = [...cms.filter((c) => c.metadata.name === "istio"), ...cms.filter((c) => /^istio-[\w-]+$/.test(c.metadata.name))];
+  if (named.length <= 1) return named;
+  const key = (ns: string | undefined, rev: string) => `${ns ?? ""}/${rev}`;
+  const livePods = new Map<string, number>();
+  for (const p of store.getClusterResources({ kind: "Pod", group: "" })) {
+    if (p.metadata.labels?.app !== "istiod") continue;
+    const phase = obj(p.status)?.phase;
+    if (phase === "Succeeded" || phase === "Failed") continue;
+    const k = key(p.metadata.namespace, revisionOf(p));
+    livePods.set(k, (livePods.get(k) ?? 0) + 1);
+  }
+  const replicas = new Map<string, number>();
+  for (const d of istiodDeployments(store)) {
+    const k = key(d.metadata.namespace, revisionOf(d));
+    replicas.set(k, (replicas.get(k) ?? 0) + Number(d.spec?.replicas ?? 1));
+  }
+  const score = (c: ParsedResource) => {
+    const k = key(c.metadata.namespace, c.metadata.name === "istio" ? "default" : c.metadata.name.slice("istio-".length));
+    const r = replicas.get(k);
+    return { scaledDown: r === 0, pods: livePods.get(k) ?? 0, replicas: r ?? 0 };
+  };
+  return named
+    .map((c, at) => ({ c, at, s: score(c) }))
+    .sort((x, y) => Number(x.s.scaledDown) - Number(y.s.scaledDown) || y.s.pods - x.s.pods || y.s.replicas - x.s.replicas || x.at - y.at)
+    .map(({ c }) => c);
+}
+
+function parseMesh(raw: unknown): Obj | null {
   if (typeof raw !== "string") return null;
   try {
-    return obj(load(raw)) ?? null;
+    const mesh = obj(load(raw));
+    return mesh ? withZeroEnums(mesh) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * MeshConfig from the busiest istiod's debug/mesh endpoint, else the `istio` ConfigMap's `mesh`
+ * key (in multi-revision installs, the revision whose istiod runs; see meshConfigMaps). The
+ * debug/mesh of an istiod no longer in the pod dump (podLiveness "stale") is used only when
+ * neither a running istiod's debug/mesh nor a ConfigMap is available.
+ */
+export function meshConfig(store: BugReportStore): Obj | null {
+  let staleMesh: Obj | null = null;
+  for (const pod of istiodsByLoad(store)) {
+    const mesh = obj(pod.debugEndpoints.get("mesh"));
+    if (!mesh) continue;
+    if (podLiveness(store, pod.namespace, pod.podName) !== "stale") return withZeroEnums(mesh);
+    staleMesh ??= mesh;
+  }
+  const meshOf = (c: ParsedResource) => obj((c as unknown as Obj).data)?.mesh;
+  for (const cm of meshConfigMaps(store)) {
+    const mesh = parseMesh(meshOf(cm));
+    if (mesh) return mesh;
+  }
+  return staleMesh ? withZeroEnums(staleMesh) : null;
 }
 
 // --- Quantities ----------------------------------------------------------
@@ -114,6 +260,143 @@ function requestsAre(container: Obj | undefined, cpu: string, memory: string): b
  * Access logging to stdout is common in production and only ever supporting evidence.
  */
 export function demoProfileEvidence(store: BugReportStore): Issue[] {
+  const demo = demoProfileIssues(store);
+  // Without demo evidence, high trace sampling is DIAG-033's (tracing configuration).
+  if (demo.length === 0) return [];
+  const sampling = traceSamplingIssues(store);
+  // The demo list already names 100% sampling from PILOT_TRACE_SAMPLING or meshConfig.
+  const reported = demo.some((i) => /\(100% trace sampling\)$/.test(i.detail));
+  // a new line saying the source of that 100% is not in effect says so about the demo line
+  // above it (whose text stays as in v0.5.0).
+  const fromEnv = demo.some((i) => i.detail === "PILOT_TRACE_SAMPLING=100 (100% trace sampling)");
+  const fromMesh = demo.some((i) => i.detail === "defaultConfig.tracing.sampling=100 (100% trace sampling)");
+  const supersedesDemo = (i: TraceSamplingIssue) => (fromEnv && (i.overrides?.env === 100 || i.overrides?.all === true)) || (fromMesh && i.overrides?.all === true);
+  return [
+    ...demo,
+    ...sampling
+      .filter((i) => !(i.effective && reported))
+      .map((i) => (supersedesDemo(i) ? { ...i.issue, detail: i.issue.detail.replace(/\)$/, "; the 100% trace sampling above is not in effect)") } : i.issue)),
+  ];
+}
+
+export interface TraceSamplingIssue {
+  issue: Issue;
+  /** The mesh-wide default rate line. */
+  effective?: boolean;
+  /**
+   * What the line says is not in effect: `env`, the PILOT_TRACE_SAMPLING value a meshConfig
+   * rate overrides; `all`, every meshConfig and PILOT_TRACE_SAMPLING rate (a mesh-wide Telemetry).
+   */
+  overrides?: { env?: number; all?: boolean };
+}
+
+/** Trace sampling at or above this percentage is reported (production meshes sample about 1%). */
+export const HIGH_TRACE_SAMPLING = 50;
+
+const TELEMETRY_GROUP = "telemetry.istio.io";
+
+function percent(n: number): string {
+  return String(Math.round(n * 100) / 100);
+}
+
+/** What strconv.ParseFloat accepts in decimal form (no hex, Inf or NaN spellings istiod would also take). */
+const GO_FLOAT_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/**
+ * The istiod workloads to read env from: the Deployments, else (a dump without them) the
+ * running istiod pods, one per owner (pods of one ReplicaSet share their env), named
+ * <namespace>/<owner>.
+ */
+function istiodWorkloads(store: BugReportStore): { istiod: string; workload: ParsedResource }[] {
+  const deployments = istiodDeployments(store);
+  if (deployments.length > 0) return deployments.map((d) => ({ istiod: id(d), workload: d }));
+  const byOwner = new Map<string, ParsedResource>();
+  for (const p of store.getClusterResources({ kind: "Pod", group: "" })) {
+    if (p.metadata.labels?.app !== "istiod") continue;
+    const phase = obj(p.status)?.phase;
+    if (phase === "Succeeded" || phase === "Failed") continue;
+    const rs = list((p.metadata as unknown as Obj).ownerReferences).map(obj).find((o) => o?.kind === "ReplicaSet");
+    const owner = typeof rs?.name === "string" ? rs.name.replace(/-[a-z0-9]{6,10}$/, "") : p.metadata.name.replace(/-[a-z0-9]{6,10}-[a-z0-9]{5}$/, "");
+    const key = `${p.metadata.namespace ?? "default"}/${owner}`;
+    if (!byOwner.has(key)) byOwner.set(key, p);
+  }
+  return [...byOwner].map(([istiod, workload]) => ({ istiod, workload }));
+}
+
+/**
+ * Trace sampling rates of 50% or more, and disagreements between the places that set it.
+ * Precedence in istiod (pilot/pkg/networking/core/tracing.go): a provider's sampler, then
+ * Telemetry randomSamplingPercentage, then meshConfig.defaultConfig.tracing.sampling (when not
+ * 0; above 100 it becomes 1), then PILOT_TRACE_SAMPLING (default 1). `effective` marks the
+ * mesh-wide default rate line.
+ */
+export function traceSamplingIssues(store: BugReportStore): TraceSamplingIssue[] {
+  const out: TraceSamplingIssue[] = [];
+  const mesh = meshConfig(store);
+  const rawMesh = Number(obj(obj(mesh?.defaultConfig)?.tracing)?.sampling ?? 0);
+  const meshSampling = Number.isFinite(rawMesh) && rawMesh !== 0 ? (rawMesh > 100 ? 1 : rawMesh) : null;
+
+  const envs: { istiod: string; value: number }[] = [];
+  for (const { istiod, workload } of istiodWorkloads(store)) {
+    for (const c of containers(workload).filter((c) => c.name === "discovery")) {
+      const e = list(c.env).map(obj).find((v) => v?.name === "PILOT_TRACE_SAMPLING" && typeof v.value === "string");
+      // istiod parses the value with strconv.ParseFloat and uses the default (1) when that
+      // fails, an empty value included (pkg/env/var.go), so such a value sets nothing.
+      const raw = typeof e?.value === "string" ? e.value : "";
+      if (!GO_FLOAT_RE.test(raw)) continue;
+      const value = Number(raw);
+      // istiod falls back to 1 for values outside 0-100 (pilot/pkg/features/telemetry.go).
+      if (Number.isFinite(value)) envs.push({ istiod, value: value < 0 || value > 100 ? 1 : value });
+    }
+  }
+
+  // A mesh-wide Telemetry rate is used before meshConfig and PILOT_TRACE_SAMPLING for every
+  // workload (tracing.go), so their rates and disagreements do not matter.
+  const rootNamespace = (mesh?.rootNamespace as string | undefined) ?? "istio-system";
+  const telemetries = store.getClusterResources({ kind: "Telemetry", group: TELEMETRY_GROUP });
+  const scopedTelemetry = (t: ParsedResource) => !!obj(t.spec?.selector) || list(t.spec?.targetRefs).length > 0 || !!obj(t.spec?.targetRef);
+  const meshWideRate = telemetries.some(
+    (t) => (t.metadata.namespace ?? "default") === rootNamespace && !scopedTelemetry(t) && list(t.spec?.tracing).some((x) => Number.isFinite(Number(obj(x)?.randomSamplingPercentage ?? NaN))),
+  );
+
+  if (meshWideRate) {
+    // Telemetry lines below only.
+  } else if (meshSampling !== null) {
+    if (meshSampling >= HIGH_TRACE_SAMPLING) {
+      out.push({ issue: { detail: `mesh-wide trace sampling ${percent(meshSampling)}% from meshConfig.defaultConfig.tracing.sampling=${percent(rawMesh)} (production rates are about 1%)`, severity: "warning" }, effective: true });
+    }
+    for (const e of envs) {
+      if (e.value === meshSampling) continue;
+      out.push({ issue: { detail: `meshConfig.defaultConfig.tracing.sampling=${percent(rawMesh)} overrides PILOT_TRACE_SAMPLING=${percent(e.value)} on ${e.istiod} (the env value is ignored)`, severity: "info" }, overrides: { env: e.value } });
+    }
+  } else {
+    for (const e of envs) {
+      if (e.value < HIGH_TRACE_SAMPLING) continue;
+      out.push({ issue: { detail: `mesh-wide trace sampling ${percent(e.value)}% from PILOT_TRACE_SAMPLING=${percent(e.value)} on ${e.istiod} (production rates are about 1%)`, severity: "warning" }, effective: true });
+    }
+  }
+
+  for (const t of telemetries) {
+    const rates = list(t.spec?.tracing).map((x) => Number(obj(x)?.randomSamplingPercentage)).filter((n) => Number.isFinite(n) && n >= HIGH_TRACE_SAMPLING);
+    if (rates.length === 0) continue;
+    const ns = t.metadata.namespace ?? "default";
+    const scoped = scopedTelemetry(t);
+    const scope = scoped ? `selected workloads in ${ns}` : ns === rootNamespace ? "mesh-wide" : `namespace ${ns}`;
+    const meshWide = ns === rootNamespace && !scoped;
+    out.push({
+      issue: {
+        detail: `Telemetry ${id(t)}: tracing randomSamplingPercentage ${percent(Math.max(...rates))} (${scope}; overrides meshConfig and PILOT_TRACE_SAMPLING)`,
+        severity: "warning",
+        ...(meshWide ? {} : { namespace: ns }),
+      },
+      ...(meshWide ? { overrides: { all: true } } : {}),
+    });
+  }
+  return out;
+}
+
+/** DIAG-002's original demo-profile evidence (unchanged): empty unless istiod runs the demo requests. */
+export function demoProfileIssues(store: BugReportStore): Issue[] {
   const istiods = istiodDeployments(store);
   const discovery = istiods.flatMap(containers).filter((c) => c.name === "discovery");
   const demoIstiod = discovery.find((c) => requestsAre(c, "10m", "100Mi"));

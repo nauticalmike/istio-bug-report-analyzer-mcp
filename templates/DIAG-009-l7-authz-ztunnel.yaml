@@ -1,0 +1,94 @@
+id: DIAG-009
+name: L7 Policies Enforced by ztunnel (Ambient)
+category: security
+severity: critical
+description: >
+  AuthorizationPolicies attached with a workload selector (or namespace-wide, or mesh-wide
+  from the root namespace) are enforced by ztunnel for ambient workloads. ztunnel is an L4
+  proxy: it cannot evaluate HTTP attributes, CUSTOM or AUDIT actions, and it reads no
+  RequestAuthentication, WasmPlugin, TrafficExtension or Telemetry. The policies listed under
+  Affected do not do what they say on those workloads, or will stop doing it when their
+  sidecar workloads move to ambient.
+rootCause: >
+  When istiod converts a selector policy for ztunnel it drops every ALLOW rule that uses an
+  HTTP attribute (methods, paths, hosts, requestPrincipals, remoteIpBlocks, request.*
+  conditions), so the rule never matches; for DENY it removes the HTTP fields from each
+  to.operation / from.source element and ztunnel skips an element left empty. A DENY rule
+  whose clauses then have no L4 element can no longer match; an element that combines L4 and
+  HTTP fields (ports and methods in the same operation) matches all of its L4 traffic; an
+  HTTP-only element beside L4 elements is dropped, so requests matching only it are no
+  longer denied. from.source.trustDomains is ignored without a status condition. Policies
+  with targetRefs are enforced by a waypoint instead; a targetRef resolves in the policy's own
+  namespace only.
+impact: >
+  An ALLOW policy whose rules all use HTTP attributes leaves the selected workloads denying
+  all traffic no other ALLOW policy permits (an outage). A DENY on HTTP-only attributes is not
+  enforced at all (a silent security gap), and a mixed DENY blocks more than intended. JWT
+  validation (RequestAuthentication), Wasm extensions and CUSTOM ext-authz stop running.
+  A selector Telemetry only loses metrics, logs and traces (info).
+signals:
+  # l7_authz_ztunnel in src/diagnostics/mesh-checks/ambient-policy.ts:
+  # - not evaluated without cluster/crs or cluster/k8s-resources;
+  # - nothing at migration stage none (no ztunnel, no ambient workloads);
+  # - critical per policy when it selects ambient pods (or an ambient namespace the pod dump
+  #   does not list), warning when it selects sidecar pods while ztunnel is installed;
+  #   a selector Telemetry is info (not a security control);
+  # - the istiod ZtunnelAccepted status is cited only when its observedGeneration equals the
+  #   policy's metadata.generation;
+  # - targetRefs: only problems unrelated to waypoints (over 16 refs, a namespace on a ref, a
+  #   Gateway of another namespace); a Service ref with no usable waypoint is DIAG-012's;
+  # - one object name copied into several namespaces with the same problem is one line, listed
+  #   under each of those namespaces in the readiness report (a root-namespace policy under the
+  #   namespaces of the pods it applies to);
+  # - dry-run policies (istio.io/dry-run true as Go strconv.ParseBool reads it: 1, t, T, TRUE,
+  #   true, True), L4-only policies and ALLOW policies with no rules are left out.
+  - source:
+      type: mesh_check
+      check: l7_authz_ztunnel
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Deploy a waypoint for the namespace (or service) and bind it with the
+      istio.io/use-waypoint label, then move the L7 rules to a policy attached to the waypoint
+      with targetRefs (the waypoint Gateway, or the Service). Create the targetRefs policy in
+      the same namespace as the Gateway or Service it targets.
+    yaml: |
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      metadata:
+        name: <policy>
+        namespace: <namespace>
+      spec:
+        targetRefs:
+          - kind: Service
+            group: ""
+            name: <service>
+        action: ALLOW
+        rules:
+          - to:
+              - operation:
+                  methods: ["GET"]
+    effort: medium
+    risk: medium
+  - order: 2
+    description: >-
+      Keep only L4 fields (ports, principals, namespaces, serviceAccounts, ipBlocks and
+      source.ip/namespace/principal or destination.ip/port conditions) on selector policies that
+      ztunnel enforces. Attach RequestAuthentication, WasmPlugin and Telemetry to the waypoint
+      with targetRefs. Replace trustDomains with principals.
+    effort: medium
+    risk: low
+  - order: 3
+    description: >-
+      Check each policy's status: istiod sets ZtunnelAccepted with reason UnsupportedValue on
+      selector policies ztunnel cannot fully enforce (kubectl get authorizationpolicy -A -o yaml).
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/l7-features/"
+  - "https://istio.io/latest/docs/ambient/migrate/migrate-policies/"
+  - "https://istio.io/latest/docs/ambient/usage/waypoint/"
+enrichmentHints:
+  docsQuery: "ambient L7 AuthorizationPolicy waypoint targetRefs"

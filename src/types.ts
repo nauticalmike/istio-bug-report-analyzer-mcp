@@ -211,6 +211,11 @@ export interface DiagnosticFinding {
   category: DiagnosticCategory;
   severity: "critical" | "warning" | "info";
   affectedResources: string[];
+  /**
+   * Every issue behind the finding, in order, one per affectedResources entry (same detail):
+   * the per-issue severity and namespace when the source set them. Issue sources only.
+   */
+  issues?: { detail: string; severity?: "critical" | "warning" | "info"; namespace?: string; namespaces?: string[] }[];
   description: string;
   rootCause: string;
   impact: string;

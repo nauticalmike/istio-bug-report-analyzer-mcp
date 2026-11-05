@@ -1,0 +1,67 @@
+id: DIAG-013
+name: VirtualService or DestinationRule L7 Features Without a Waypoint
+category: sidecar-to-ambient
+severity: critical
+# The check returns nothing on a mesh with no ambient footprint (no ztunnel, no ambient pods).
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Mesh VirtualServices (retries, timeouts, fault injection, mirroring, rewrites, header
+  changes, weighted, subset or match routing) and DestinationRules (consistentHash,
+  localityLbSetting, outlierDetection, connectionPool.http, subsets a mesh VirtualService
+  routes to, TLS origination) apply to ambient Services or ServiceEntries that have no usable
+  waypoint, or to sidecar Services that will move to ambient; one line per host. Both are
+  applied by the client proxy, so the finding is critical once ambient clients exist (for
+  sidecar Services too: their ambient clients skip them) and a migration blocker (warning)
+  while every caller is a sidecar. A host's line lists at most 8 VirtualServices and
+  DestinationRules, then the count of the rest. HTTP-only settings on hosts with no
+  HTTP port, subsets nobody routes to and subsets that select the whole Service are not
+  reported. When a ready waypoint already exists in the namespace, the exact label is given. On
+  waypoint-served Services it also reports VirtualService sourceLabels matches (dropped at
+  the waypoint), VirtualServices outside the Service's and the waypoint's namespace (ignored
+  by the waypoint), Services routed by both an HTTPRoute and a VirtualService, and
+  DestinationRule subsets used for routing (HTTPRoute has no subsets).
+  On Solo builds, a waypoint listed (as namespace/serviceaccount) in istiod's
+  PERMIT_CROSS_NAMESPACE_RESOURCE_ACCESS has cross-namespace resource access, so it is not
+  reported for VirtualServices in other namespaces.
+rootCause: >
+  ztunnel is an L4 proxy: it does no HTTP routing and ignores DestinationRules, including
+  their TLS origination. In ambient mode these features are applied only by a waypoint, and
+  the waypoint reads VirtualServices only from the Service's namespace or its own, without
+  source-label matching.
+impact: >
+  Once clients or Services are ambient, the configured retries, timeouts, traffic splits,
+  canaries, consistent hashing and outlier ejection silently stop applying, and traffic that
+  relied on DestinationRule TLS origination leaves the cluster unencrypted.
+signals:
+  - source:
+      type: mesh_check
+      check: vs_dr_without_waypoint
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Deploy a waypoint for the Service (or namespace) and bind it with istio.io/use-waypoint before moving it, or its clients, to ambient"
+    command: "istioctl waypoint apply -n <namespace> --enroll-namespace"
+    effort: low
+    risk: low
+  - order: 2
+    description: "Move routing to Gateway API HTTPRoute with a Service parentRef (VirtualService at waypoints is Alpha); replace DestinationRule subsets with per-version Services; keep one of HTTPRoute or VirtualService per Service"
+    effort: medium
+    risk: medium
+  - order: 3
+    description: "Replace sourceLabels matches with header or path matches, and move VirtualServices into the Service's namespace (or the waypoint's)"
+    effort: medium
+    risk: medium
+  - order: 4
+    description: "For DestinationRule TLS origination to external hosts, bind the ServiceEntry to an egress waypoint (istio.io/use-waypoint) before ambient clients call it, or have the application speak TLS"
+    effort: medium
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/ambient/usage/l7-features/"
+  - "https://istio.io/latest/docs/ambient/migrate/migrate-policies/"
+  - "https://istio.io/latest/docs/releases/feature-stages/"
+enrichmentHints:
+  docsQuery: "ambient VirtualService waypoint retries DestinationRule"

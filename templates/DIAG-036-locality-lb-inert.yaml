@@ -1,0 +1,53 @@
+id: DIAG-036
+name: Locality Load Balancing Inert Without outlierDetection
+category: connectivity
+severity: warning
+description: >
+  DestinationRules whose localityLbSetting sets failover or failoverPriority without
+  outlierDetection (top-level, port-level or subset-level); a meshConfig.localityLbSetting failover with the
+  DestinationRules that lack outlierDetection; distribute weights that do not sum to 100; in a
+  cluster whose nodes span two or more zones, the DestinationRules without outlierDetection
+  that leave the default locality load balancing off (info); and, when some nodes have a zone,
+  the nodes without a zone label (topology.kubernetes.io/zone or the legacy
+  failure-domain.beta.kubernetes.io/zone); nodes with zone "0" (a non-zonal pool) are a note,
+  since istiod makes "0" a locality of its own. Only Envoy clients
+  (sidecars, gateways, waypoints) apply DestinationRules, so they are skipped when none runs;
+  ambient hosts without a waypoint are left to DIAG-013 (ztunnel ignores DestinationRules; a
+  host "*" stands for the Services of the DestinationRule's namespace);
+  DestinationRules whose host is no Service or ServiceEntry are skipped; generated ones
+  (ownerReferences or generator labels) are merged into one line per rule.
+rootCause: >
+  Locality load balancing is on by default, but istiod applies failover (default, failover or
+  failoverPriority) only to clusters with outlierDetection, since Envoy only moves to a lower
+  priority after ejecting endpoints.
+impact: >
+  Traffic keeps crossing zones or regions (cost, latency) and does not fail over when a zone
+  degrades; endpoints on nodes without a zone fall into the wrong locality.
+signals:
+  - source:
+      type: mesh_check
+      check: locality_lb_inert
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Add outlierDetection to the DestinationRules that rely on locality failover"
+    yaml: |
+      trafficPolicy:
+        outlierDetection:
+          consecutive5xxErrors: 5
+          interval: 10s
+          baseEjectionTime: 30s
+    effort: low
+    risk: low
+  - order: 2
+    description: "Fix distribute weights to total 100 and label every node with topology.kubernetes.io/zone"
+    effort: low
+    risk: low
+  - order: 3
+    description: "For generated DestinationRules, change the generator's source configuration rather than the objects"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/tasks/traffic-management/locality-load-balancing/failover/"
+  - "https://istio.io/latest/docs/reference/config/networking/destination-rule/#LocalityLoadBalancerSetting"

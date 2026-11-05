@@ -40,7 +40,10 @@ remediation:
     effort: trivial
     risk: none
   - order: 3
-    description: "Keep a PodDisruptionBudget for istiod so node drains cannot take every replica at once (the istiod chart creates one by default when replicas allow it)"
+    description: >-
+      Advisory (PodDisruptionBudgets are not collected in the bug report, so this cannot be
+      checked here): keep a PodDisruptionBudget for istiod so node drains cannot take every
+      replica at once (the istiod chart creates one by default when replicas allow it).
     yaml: |
       apiVersion: policy/v1
       kind: PodDisruptionBudget

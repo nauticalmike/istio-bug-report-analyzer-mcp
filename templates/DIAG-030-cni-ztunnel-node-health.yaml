@@ -1,0 +1,121 @@
+id: DIAG-030
+name: istio-cni or ztunnel Failing on Nodes
+category: ambient
+severity: critical
+# Every mode: the check returns nothing on a mesh with no ambient footprint.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  The istio-cni node agent or ztunnel failed to enroll pods on some nodes (see Affected, one
+  line per failure pattern with its count, nodes and time window): istio-cni logged that it
+  had no ztunnel connection, added pods only partly, or gave up capturing pods (hostNetwork
+  pods left out); ztunnel could not connect to the istio-cni node agent; pod
+  sandboxes failed in the istio-cni plugin (a wrong cniBinDir); running ambient pods lack
+  ambient.istio.io/redirection=enabled; istio-cni or ztunnel pods restarted or still run an
+  image older than their DaemonSet's; reconcile-on-startup is off; or sidecar pods still use
+  istio-init next to istio-cni (info). A skipped host-probe ipset removal after pod IP reuse
+  is listed as info (intended behaviour). DaemonSet readiness, PILOT_ENABLE_AMBIENT,
+  AMBIENT_ENABLED and excludeNamespaces are reported by DIAG-017.
+rootCause: >
+  istio-cni enrolls a pod by redirecting its traffic and handing its network namespace to
+  the node's ztunnel over a local socket. When a node starts, application pods often start
+  before ztunnel has connected to istio-cni (the node startup race), or ztunnel and istio-cni
+  restart, crash or run different versions after an upgrade; the pods started in that window
+  wait, are left pending, or run outside the mesh. A primary CNI that rewrites its config,
+  or istio-cni installed to the wrong cniBinDir or cniConfDir, breaks pod startup itself.
+impact: >
+  Critical once ambient workloads exist: pods that are not redirected bypass ztunnel (no
+  mTLS, no AuthorizationPolicy), pending pods lose traffic, and a missing plugin binary keeps
+  pods from starting on the node. "No ztunnel connection" and "partially added" (one line:
+  the same attempt logs both) that all fall in a startup window (istio-cni or ztunnel start,
+  or before the node's ztunnel was replaced), or a burst that ended long before the end of
+  the istio-cni log, are a warning when no pod on those nodes is left unredirected at
+  collection. ztunnel's CNI connection failures are critical only when still failing at the
+  end of its log or lasting over 5 minutes; a restart race that ended in a connection is
+  info. One or two sandbox events are a warning, and the agent's stale pod cache ("failed
+  to get pod", retried by the kubelet) is info. Restarts that predate the collected logs
+  are info (historical). Before any workload is ambient these are warnings. Log counts
+  cover only the bug report's collection window.
+signals:
+  # cni_ztunnel_node_health in src/diagnostics/mesh-checks/ambient-dataplane.ts:
+  # - not evaluated without cluster/k8s-resources, or when every resource check is clean
+  #   and the istio-cni or ztunnel logs were not collected (cni/<pod>/cni.log,
+  #   proxies/<ns>/ztunnel-*/istio-proxy.log); with findings, a line names the missing logs;
+  # - log lines are counted per node (the pod dump's spec.nodeName) through the shared
+  #   log-rule scan; log sources whose pod is not in the dump are named as pods, not nodes;
+  # - "no ztunnel connection" counts only the cni-agent "AddPodToMesh returned" line (not
+  #   the controllers queue's retry line); it and "partially added" are one line counting
+  #   attempts (per istio-cni pod the larger of the two counts) and the pods named (ns=,
+  #   name=); a node is in its startup window when every hit lies within 5 minutes after the
+  #   logging istio-cni pod's container start ("node startup race"), within [ztunnel start
+  #   - 1 min, + 5 min] ("ztunnel restart"), or between the istio-cni start and 5 minutes
+  #   after the node's ztunnel was replaced more than 5 minutes later, with no "new ztunnel
+  #   connected" before the first hit ("rollout ordering gap"); those nodes are one line, a
+  #   warning unless a pod there is unredirected at collection; nodes outside it are a
+  #   separate line, critical unless the burst ended 30 minutes or more before the end of
+  #   the istio-cni log and nothing there is unredirected;
+  # - ztunnel "failed to connect to the Istio CNI node agent" per ztunnel pod: critical when
+  #   no "handling new stream" follows the last failure and the log does not go on quietly
+  #   for a minute (still failing), or the failures span over 5 minutes; info when every
+  #   failure is within 5 minutes of the node's ztunnel or istio-cni container start; else a
+  #   warning;
+  # - sandbox events count only the istio-cni plugin's part (plugin type="istio-cni",
+  #   "istio-cni cmdAdd", failed to find plugin "istio-cni"), never pod names; "failed to
+  #   get pod" (agent pod cache) is info up to 10 events; 1-2 events of a class are a warning;
+  # - DaemonSet restarts whose current container started over 5 minutes before the pod's
+  #   collected log begins are historical: info when every restart is;
+  # - "Failed capturing pod" lines are grouped per pod (ns=/name= labels): hostNetwork pods
+  #   are left out, the netns cause is counted on that line (the netns rule skips them), and
+  #   it is a warning when every named pod is gone or enrolled at collection;
+  # - the "reconcile is needed" line of the host-level setup (component=host) is ignored;
+  # - AMBIENT_RECONCILE_POD_RULES_ON_STARTUP is judged on istio-cni 1.25+ only (unset is false);
+  #   a warning when the "reconcile is needed" line was logged, else info;
+  # - unredirected pods: Running pods ambient by label without the enabled annotation,
+  #   outside the namespaces istio-cni excludes (DIAG-017 reports those);
+  # - lines are sorted most severe first; nothing is capped here.
+  - source:
+      type: mesh_check
+      check: cni_ztunnel_node_health
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      For "no ztunnel connection", "pod partially added" and the ztunnel CNI connection line:
+      make sure ztunnel and istio-cni are scheduled and ready on a node before application
+      pods (both use the system-node-critical priority class by default; keep it, and give
+      the namespace a ResourceQuota that allows it), and keep application pods off new nodes
+      until they are ready, with a startup taint removed once both run or an untaint
+      controller. Restart pods left pending or unredirected.
+    command: "kubectl get pods -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,NODE:.spec.nodeName,REDIRECTION:.metadata.annotations.ambient\\.istio\\.io/redirection"
+    effort: medium
+    risk: low
+  - order: 2
+    description: >-
+      Turn on reconciliation of in-pod iptables rules at istio-cni startup, so an upgrade
+      does not leave pods with old rules (the default from 1.29).
+    command: "helm upgrade istio-cni istio/cni -n istio-system --reuse-values --set ambient.reconcileIptablesOnStartup=true"
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      Finish stalled ztunnel or istio-cni rollouts node by node (drain a node before its
+      ztunnel restarts), and fix the restart cause (OOMKilled: raise the memory limit).
+    command: "kubectl -n istio-system rollout status ds/istio-cni-node; kubectl -n istio-system rollout status ds/ztunnel"
+    effort: low
+    risk: medium
+  - order: 4
+    description: >-
+      If pod sandboxes fail with 'failed to find plugin "istio-cni"', set the istio-cni
+      cniBinDir (and cniConfDir) to the platform's CNI directories (the platform profiles,
+      e.g. --set global.platform=gke, set them).
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/setup/additional-setup/cni/#race-condition--mitigation"
+  - "https://istio.io/latest/docs/ambient/architecture/traffic-redirection/"
+  - "https://istio.io/latest/docs/ambient/install/platform-prerequisites/"
+enrichmentHints:
+  docsQuery: "istio-cni ambient node agent no ztunnel connection startup race reconcileIptablesOnStartup"

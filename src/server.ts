@@ -15,6 +15,7 @@ import { getIstiodDebug } from "./tools/istiod-debug.js";
 import type { BugReportStore } from "./archive/store.js";
 import { listFiles, getRawFile } from "./resources/archive-resource.js";
 import { runDiagnostics } from "./tools/diagnostics.js";
+import { ambientReadinessReport } from "./tools/ambient-readiness.js";
 import { findErrors } from "./tools/find-errors.js";
 import { estimateResourceSavings } from "./tools/resource-savings.js";
 import { SERVER_VERSION } from "./version.js";
@@ -209,6 +210,21 @@ export function createServer(config: ServerConfig) {
       if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
       await store.ensureClusterResources();
       return withClusterWarnings(store, await estimateResourceSavings(store));
+    },
+  );
+
+  server.tool(
+    "ambient_readiness_report",
+    "Sidecar-to-ambient readiness: the migration stage, a per-namespace table (pods by capture mode, waypoint, issue counts) and every blocker from the revision-hygiene and ambient checks (L7 policy ztunnel cannot enforce, VirtualService/DestinationRule/EnvoyFilter features with no waypoint, lost egress lockdown, unusable waypoints, ingress bypass, NetworkPolicy and install gaps), each with its fix, then a cutover checklist. Says what breaks; estimate_resource_savings says what is saved. Lists every issue; paged by report entry (one per issue line) with offset.",
+    {
+      namespace: z.string().optional().describe("Only this namespace's rows and issues"),
+      offset: z.number().optional().describe("Skip this many report entries (for paging); the footer gives the next offset"),
+    },
+    async (params) => {
+      const store = getStore();
+      if (!store) return { content: [{ type: "text", text: "No bug report loaded. Use load_bug_report first." }], isError: true };
+      await store.ensureClusterResources();
+      return withClusterWarnings(store, await ambientReadinessReport(store, params));
     },
   );
 

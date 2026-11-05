@@ -1,0 +1,62 @@
+id: DIAG-021
+name: Config Conflicts Dropped by Istiod
+category: config
+severity: warning
+description: >
+  istiod's last push recorded configuration it could not use as written (see Affected), from
+  debug/push_status: inbound or outbound listener conflicts, VirtualServices with duplicate
+  domains, duplicate clusters from ServiceEntries with the same host, duplicate
+  DestinationRule subsets, and (info) clusters or DNS clusters without endpoints. From
+  istiod's metrics: Gateway servers it rejected (pilot_total_rejected_configs, by Gateway).
+  Each line gives the count, the proxies affected and the most frequent messages.
+rootCause: >
+  Two resources claim the same thing and istiod keeps only one: a Service and a ServiceEntry
+  (often a generated ServiceEntry with a workloadSelector) on the same port of a workload;
+  TCP and HTTP services on one outbound port; two VirtualServices for one host on the same
+  gateway; ServiceEntries with the same hostname; two Gateways with the same port and host.
+  istiod does not reject the resources, it silently drops part of the result.
+impact: >
+  Traffic follows whichever definition won, which can change between pushes or istiod
+  versions: requests reach the wrong service or port, a route or Gateway server is missing,
+  or a protocol is sniffed wrongly. Clusters without endpoints return 503 until pods are
+  ready (info).
+signals:
+  # push_conflicts in src/diagnostics/mesh-checks/control-plane.ts:
+  # - push_status per metric: the replica with the most entries (others listed with their
+  #   counts, how many report none of the metric and on how many push_status is empty),
+  #   distinct proxies, top 3 messages; warning for conflicts and duplicates, info for
+  #   missing endpoints; sorted most severe first;
+  # - pilot_eds_no_instances: the
+  #   outbound| and outbound_. names of one cluster counted once; clusters counted by
+  #   Service (other hosts apart): ready endpoints now (transient), selector-less or every
+  #   route sent elsewhere by a VirtualService (expected, no 503 claim), none (503), from
+  #   the dump's Service, VirtualService and Endpoints/EndpointSlices when collected;
+  # - pilot_total_rejected_configs{type="gateway"} by name (a counter since istiod started,
+  #   largest replica): warning;
+  # - not evaluated when neither push_status nor istiod metrics were collected.
+  - source:
+      type: mesh_check
+      check: push_conflicts
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Read the conflicts istiod is resolving now, and let istioctl analyze name the
+      resources (IST0109 conflicting mesh gateway VirtualServices,
+      IST0145 conflicting Gateways and others).
+    command: "kubectl exec -n istio-system deploy/istiod -- curl -s localhost:15014/debug/push_status; istioctl analyze -A"
+    effort: trivial
+    risk: none
+  - order: 2
+    description: >-
+      Remove the duplicate: give the ServiceEntry a host or port that does not collide with
+      the Service (or drop its workloadSelector), merge VirtualServices for one host into one,
+      give each Gateway server a distinct port or host, and keep one DestinationRule per host.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ops/diagnostic-tools/istioctl-analyze/"
+  - "https://istio.io/latest/docs/ops/best-practices/traffic-management/"
+enrichmentHints:
+  docsQuery: "push_status conflict inbound listener duplicate domain ServiceEntry Gateway conflict"

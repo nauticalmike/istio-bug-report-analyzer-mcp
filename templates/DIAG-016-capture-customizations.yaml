@@ -1,0 +1,59 @@
+id: DIAG-016
+name: Capture Customizations Ambient Ignores
+category: sidecar-to-ambient
+severity: critical
+# Returns nothing on a mesh with no ambient footprint.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Pods that are ambient, or sidecar pods while a migration is planned or partial, carry
+  sidecar capture settings that ambient ignores: traffic.sidecar.istio.io/* include/exclude
+  ranges, ports and interfaces (other than the injector defaults), sidecar.istio.io/interceptionMode
+  TPROXY, and proxy.istio.io/config overrides. An empty includeInboundPorts (no inbound
+  capture) counts: ztunnel captures every port. Severity follows the effect: an inbound
+  exclusion is critical only for ports where an effective STRICT PeerAuthentication (mesh,
+  namespace or workload; port-level settings as ztunnel enforces them) now rejects plaintext
+  clients, a warning under PERMISSIVE and info with a port-level exemption. A port-level
+  DISABLE in a workload policy whose own mode is UNSET under a STRICT parent is not an
+  exemption in ambient unless the policy also has a PERMISSIVE port (istiod then sends only
+  its static STRICT policy). Outbound exclusions are info (the
+  excluded destinations leave as passthrough); proxy.istio.io/config with only lifecycle keys,
+  or equal to meshConfig.defaultConfig, is info. Sidecar pods are judged one level lower, and
+  deliberate sidecars (sidecar.istio.io/inject=true in an ambient namespace) are info.
+  Host-network pods in ambient namespaces are listed by owner (info): they are never captured
+  in either mode. Grouped by annotation value.
+rootCause: >
+  Ambient capture is done by istio-cni and ztunnel, which read only
+  ambient.istio.io/bypass-inbound-capture, ambient.istio.io/dns-capture and
+  istio.io/reroute-virtual-interfaces. The sidecar iptables annotations and per-pod proxy
+  config have no counterpart.
+impact: >
+  Traffic a sidecar deliberately left uncaptured (CIDRs, ports) is captured and mTLS-wrapped
+  in ambient, or traffic expected to be captured is not, changing egress and inbound behavior
+  after the migration.
+signals:
+  - source:
+      type: mesh_check
+      check: capture_customizations
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Review why each exclusion exists; replace outbound exclusions with ServiceEntries or egress waypoints, and inbound ones with ambient.istio.io/bypass-inbound-capture"
+    effort: medium
+    risk: medium
+  - order: 2
+    description: "Remove sidecar-only annotations from ambient workloads' pod templates once replaced (istio.io/reroute-virtual-interfaces replaces kubevirtInterfaces)"
+    effort: low
+    risk: low
+  - order: 3
+    description: "Keep host-network workloads out of the mesh plan or move them off hostNetwork"
+    effort: medium
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/add-workloads/"
+  - "https://istio.io/latest/docs/reference/config/annotations/"
+enrichmentHints:
+  docsQuery: "ambient excludeOutboundIPRanges bypass-inbound-capture"

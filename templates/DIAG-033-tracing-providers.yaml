@@ -1,0 +1,47 @@
+id: DIAG-033
+name: Tracing and Extension Provider Misconfiguration
+category: config
+severity: warning
+description: >
+  Telemetry or meshConfig.defaultProviders names that match no meshConfig.extensionProviders
+  entry (prometheus, stackdriver and envoy are built in); a referenced provider whose service
+  is not a Service or ServiceEntry in the dump; Sidecars in a referenced provider's scope whose
+  egress does not import its Service (their proxies have no cluster for it, so Envoy logs
+  "cluster outbound|<port>||<host> is not configured"); a legacy
+  defaultConfig.tracing address (zipkin, lightstep, datadog) naming no Service, in meshConfig
+  or in a pod's proxy.istio.io/config annotation (one line per address with its workloads); referenced provider types Istio dropped
+  (opencensus and stackdriver from xDS generation in 1.23, lightstep ignored from 1.27) and
+  legacy meshConfig.defaultConfig.tracing tracers dropped from the proxy bootstrap
+  (stackdriver 1.23, openCensusAgent 1.25), as warnings when the control plane is at or past
+  that version and as info before it; legacy defaultConfig.tracing next to Telemetry tracing
+  (info); trace sampling of 50% or more from PILOT_TRACE_SAMPLING, meshConfig or Telemetry
+  randomSamplingPercentage, and meshConfig overriding a different PILOT_TRACE_SAMPLING, when
+  the mesh is not on the demo profile (DIAG-002 reports it there); and, from the logs, Envoy OTLP exporter errors, istiod "could not find cluster for
+  ... provider" and ztunnel OpenTelemetry export errors, with counts, sources, the time window
+  and a redacted example (info when there are fewer than 10 lines, fewer than 50 within five
+  minutes, or under 10 lines per hour on average over an hour or more). Logs cover only the bug report's collection window.
+rootCause: >
+  Telemetry providers are resolved by name against meshConfig.extensionProviders and their
+  service against the service registry; a missing name or service is skipped with a log line
+  on every push. Removed provider types are ignored without an error.
+impact: >
+  Traces, metrics or access logs silently stop; istiod can log the same error millions of
+  times; exporters retry against unreachable collectors.
+signals:
+  - source:
+      type: mesh_check
+      check: tracing_providers
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Define every provider Telemetry references in meshConfig.extensionProviders, pointing at an existing collector Service (FQDN)"
+    effort: low
+    risk: low
+  - order: 2
+    description: "Replace opencensus, stackdriver and lightstep providers (and legacy defaultConfig.tracing) with the opentelemetry provider and the Telemetry API"
+    effort: medium
+    risk: low
+references:
+  - "https://istio.io/latest/docs/tasks/observability/distributed-tracing/telemetry-api/"
+  - "https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/#MeshConfig-ExtensionProvider"

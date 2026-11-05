@@ -24,6 +24,7 @@ describe("namespaceMode", () => {
         namespace("rev", { "istio.io/rev": "1-27" }),
         namespace("both", { "istio.io/dataplane-mode": "ambient", "istio.io/rev": "1-27" }),
         namespace("off", { "istio.io/rev": "1-27", "istio-injection": "disabled" }),
+        namespace("odd", { "istio.io/rev": "1-27", "istio-injection": "true" }),
         namespace("plain"),
       ],
     });
@@ -33,6 +34,7 @@ describe("namespaceMode", () => {
     expect(namespaceMode(store, "both")).toBe("dual");
     // istio-injection present (any value) disables the revision webhooks.
     expect(namespaceMode(store, "off")).toBe("none");
+    expect(namespaceMode(store, "odd")).toBe("none");
     expect(namespaceMode(store, "plain")).toBe("none");
     expect(ambientNamespaces(store)).toEqual(["amb", "both"]);
   });

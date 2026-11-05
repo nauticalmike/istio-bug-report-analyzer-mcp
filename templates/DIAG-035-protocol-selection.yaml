@@ -1,0 +1,55 @@
+id: DIAG-035
+name: Protocol Selection on Server-First and Reserved Ports
+category: connectivity
+severity: warning
+description: >
+  Counted per namespace: Service ports on server-first protocols (MySQL, SMTP, FTP, POP3,
+  IMAP, NATS, by port or numeric targetPort) without a protocol name or appProtocol, which
+  sidecars, gateways and waypoints sniff (istiod itself treats unnamed 25, 53, 3306 and 27017
+  as TCP); unnamed client-first, non-HTTP ports (PostgreSQL, Redis, Kafka, AMQP, Memcached,
+  ZooKeeper, Cassandra, MongoDB), sniffed at some cost (info); ports named or declared HTTP on
+  those protocols' ports; and Service ports Istio reserves (15000, 15001, 15004, 15006, 15008,
+  15020, 15021, 15053, 15090) on Services that select sidecar or ambient pods, except ports
+  named for metrics or health. Also Gateway API HTTPS (Terminate) and TLS Passthrough listeners
+  of an Istio Gateway on the same port and hostname. A protocol guessed from the targetPort
+  number alone (no name, Service port number or backend container port name confirms it) is
+  info; no protocol is guessed when the backend names the container port http*, grpc* or h2c*
+  or probes it over HTTP or gRPC, or when the port name says what it is for (metrics, health,
+  admin, client...). Identical lines of several namespaces are merged. Sniffing rules are
+  skipped when no Envoy proxy runs, and for ambient Services without a waypoint when no sidecar
+  runs (ztunnel does not sniff); ambient Services with a waypoint name the waypoint as the
+  sniffer; client-first ports are reported only when sidecar clients run or the Service has a
+  waypoint (gateways do not sniff). Selector-less Services without endpoints, and Services that
+  every mesh VirtualService route sends elsewhere, are skipped. Condenses istioctl analyze IST0118.
+rootCause: >
+  Without a protocol name or appProtocol the proxy waits for the client's first bytes to
+  detect HTTP; a server-first protocol never sends them. HTTP-named ports go through Envoy's
+  HTTP codec. Istio's own listeners already use the reserved ports.
+impact: >
+  Database or mail connections hang until timeout, non-HTTP traffic on HTTP-named ports fails,
+  listeners on reserved ports conflict, and TLS clients hit the wrong filter chain or
+  filter_chain_not_found.
+signals:
+  - source:
+      type: mesh_check
+      check: protocol_selection
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Name the ports tcp-<name> (or set appProtocol: tcp) for non-HTTP protocols, and only use http-* names for HTTP"
+    yaml: |
+      ports:
+        - name: tcp-mysql
+          port: 3307
+          targetPort: 3306
+          appProtocol: tcp
+    effort: trivial
+    risk: low
+  - order: 2
+    description: "Move Services off 15000-15090, and split HTTPS Terminate and TLS Passthrough listeners onto different hostnames or ports"
+    effort: low
+    risk: medium
+references:
+  - "https://istio.io/latest/docs/ops/configuration/traffic-management/protocol-selection/"
+  - "https://istio.io/latest/docs/ops/deployment/application-requirements/"

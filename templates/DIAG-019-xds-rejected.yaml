@@ -1,0 +1,90 @@
+id: DIAG-019
+name: xDS Config Rejected or Not Acknowledged
+category: config
+severity: critical
+description: >
+  Proxies refused configuration istiod pushed to them (an xDS NACK), or left a push
+  unacknowledged long after later pushes went out (see Affected). Lines are grouped by xDS
+  type (CDS clusters, LDS listeners, RDS routes, EDS endpoints) and by the error, with the
+  number of distinct proxies, their kinds, and the resource most likely behind the error.
+  Sources: istiod debug/syncz (state at collection), istiod's log (`ADS:<type>: ACK ERROR`)
+  and the proxies' logs (Envoy `gRPC config for <type> rejected`, pilot-agent readiness
+  `config received from XDS server, but was rejected`).
+rootCause: >
+  istiod translates the Istio and Gateway API resources into Envoy config without knowing
+  everything Envoy will refuse. Common causes: an invalid RE2 regex in a VirtualService
+  match; an EnvoyFilter patch with a filter, field or type URL the proxy version does not
+  know (often after an upgrade); two listeners on one address from overlapping Gateway
+  servers or a port collision; a Gateway credentialName or DestinationRule secret that is
+  missing or malformed; or a route without an action.
+impact: >
+  Critical: a proxy that NACKs a type keeps its previous config for that type, so every
+  later change of that type (new routes, clusters, endpoints, listeners) never reaches it,
+  and a proxy whose xDS messages exceed the gRPC size limit receives no config at all,
+  and a proxy that never received an accepted config stays not ready. One bad resource can
+  affect every proxy it is pushed to, up to the whole mesh. Rejections seen only in the
+  logs while syncz shows none at collection are a warning: they were fixed, or the config
+  flaps. An unacknowledged push with no error is a warning when later pushes were
+  acknowledged elsewhere (the proxy is stuck); a large set that cannot be dated may be a
+  push in flight when the report was collected (info).
+signals:
+  # xds_rejected in src/diagnostics/mesh-checks/control-plane.ts:
+  # - syncz NACKs: one critical line per type x normalized error, distinct proxies, kinds,
+  #   per istiod when several, up to 5 examples, the likely culprit from the error text;
+  # - syncz stale (CDS/LDS/RDS/EDS/ECDS only; ambient delta types are not judged): warning
+  #   when the unacked push is over 60 s older than the istiod's latest push, or the proxy
+  #   also logged a rejection; otherwise info only when >= 5 proxies and >= 10% of the
+  #   istiod's proxies show one (a lone stale entry can be a push in flight);
+  # - istiod and proxy log groups (type x normalized error, distinct proxies, window):
+  #   critical while a proxy of the group still NACKs or syncz is missing, else warning;
+  #   10 groups per log source, the rest in one line;
+  # - more than 5 istiods: per-istiod counts as a range; unconfirmed stale entries are one
+  #   line for the mesh, with the push rate from istiod's log ("XDS: Pushing");
+  # - "received message larger than max" in proxy logs (pilot-agent xdsproxy, Envoy stream
+  #   closed): critical, one line per side that refused it, counted in events (pilot-agent's
+  #   line, not also Envoy's for the same refusal); pilot-agent's refusal needs
+  #   ISTIO_GPRC_MAXRECVMSGSIZE raised in proxyMetadata and on istiod, which receives the
+  #   forwarded request;
+  # - pilot_total_xds_rejects (istiod metrics, since start) only when syncz and the logs show
+  #   no rejection: summed across replicas, with how many replicas had metrics; warning from
+  #   10, else info;
+  # - syncz only from istiods serving no proxies is treated as missing ("partial" line);
+  #   "partial" info lines also when a revision serving injected pods has no istiod with
+  #   syncz, or an istiod reports adsz clients without a parseable syncz;
+  # - logs of pods no longer in the dump are named once per finding;
+  # - TLS-credential errors point to DIAG-025 for secrets missing from the dump;
+  # - not evaluated only when syncz and the istiod and proxy logs are all missing.
+  - source:
+      type: mesh_check
+      check: xds_rejected
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Confirm which proxies are out of sync and read the full error for one of them.
+    command: "istioctl proxy-status; istioctl proxy-status <pod>.<namespace>   # the NACK error is shown per type"
+    effort: trivial
+    risk: none
+  - order: 2
+    description: >-
+      Fix or remove the resource the error names (see "likely" on each line): validate
+      regexes as RE2, rewrite or delete EnvoyFilters that target filters or fields this proxy
+      version does not support, give conflicting Gateway servers distinct ports or hosts,
+      and fix the referenced TLS secret. istioctl analyze flags many of these.
+    command: "istioctl analyze -A; kubectl get envoyfilter -A"
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      After the fix, the next push is accepted without a restart; confirm with
+      istioctl proxy-status that every type shows SYNCED. Restart only proxies that
+      still show STALE for minutes after a successful push.
+    command: "istioctl proxy-status | grep -v SYNCED"
+    effort: trivial
+    risk: none
+references:
+  - "https://istio.io/latest/docs/ops/diagnostic-tools/proxy-cmd/"
+  - "https://istio.io/latest/docs/ops/common-problems/network-issues/"
+enrichmentHints:
+  docsQuery: "istioctl proxy-status NACK STALE rejected configuration envoy"

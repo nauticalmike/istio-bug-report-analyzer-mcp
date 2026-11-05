@@ -1,0 +1,52 @@
+id: DIAG-027
+name: Risky istiod Flags or Exposed Plaintext xDS
+category: security
+severity: warning
+description: >
+  istiod runs with environment flags that turn off a security check or delay config
+  delivery, or istiod's plaintext xDS port 15010 is exposed outside the cluster by a
+  LoadBalancer or NodePort Service. Each line names the flag, the value, the default and the
+  workload that sets it (a Pod only when its Deployment does not set the same value). Flags
+  are reported whatever the control plane version (several were added in patch releases),
+  except AMBIENT_ENABLE_STATUS, which exists from 1.24. PILOT_SKIP_VALIDATE_TRUST_DOMAIN is
+  info when the mesh evidently spans clusters or trust domains (peering discovery, a custom
+  trust domain or aliases, an east-west gateway).
+rootCause: >
+  Flags copied from troubleshooting sessions or old values files: trust-domain validation
+  skipped (PILOT_SKIP_VALIDATE_TRUST_DOMAIN), xDS client authentication or identity checks off
+  (XDS_AUTH, PILOT_ENABLE_XDS_IDENTITY_CHECK, ENABLE_XDS_API_GENERATOR_AUTH), debug endpoint
+  authorization off (ENABLE_DEBUG_ENDPOINT_AUTH), unsafe admin endpoints on, debounce settings
+  far above the defaults (100ms / 10s), first-party JWTs, ambient status writing off, or the
+  deprecated ISTIO_META_DNS_AUTO_ALLOCATE.
+impact: >
+  Weaker authentication between proxies and istiod and between workloads, config readable by
+  any workload, and config changes that take tens of seconds to reach proxies.
+signals:
+  # risky_istiod_flags in src/diagnostics/mesh-checks/security-posture.ts:
+  # - literal env values of istiod's discovery container (Deployments and Pods); names and
+  #   defaults from istio/istio pilot/pkg/features; values are Go strconv.ParseBool and
+  #   time.ParseDuration as istiod reads them;
+  # - not evaluated without cluster/k8s-resources.
+  - source:
+      type: mesh_check
+      check: risky_istiod_flags
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Remove the flag from the istiod values (pilot.env, or the IstioOperator / Helm
+      values.pilot.env) so the safe default applies, and restart istiod.
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Expose only 15012 (xDS over mTLS) and 15017 (webhooks) to remote clusters; keep 15010 on
+      a ClusterIP Service.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ops/best-practices/security/#lock-down-ports"
+  - "https://istio.io/latest/docs/reference/commands/pilot-discovery/"
+enrichmentHints:
+  docsQuery: "pilot-discovery environment variables security"

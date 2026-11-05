@@ -188,6 +188,16 @@ function resourceKey(r: ParsedResource): string {
   return `${r.apiVersion ?? ""}|${r.kind ?? ""}|${r.metadata?.namespace ?? ""}|${r.metadata?.name ?? ""}`;
 }
 
+interface ResourceIndex {
+  /** The resource list the index was built from (rebuilt when it changes). */
+  source: ParsedResource[];
+  byKind: Map<string, ParsedResource[]>;
+  byKindGroup: Map<string, ParsedResource[]>;
+  byKindNs: Map<string, ParsedResource[]>;
+  byKindNsName: Map<string, ParsedResource[]>;
+  byNamespace: Map<string, ParsedResource[]>;
+}
+
 export class BugReportStore {
   private index: ArchiveIndex;
   private pathIndex = new Map<string, string>(); // relativePath -> absolutePath
@@ -197,6 +207,7 @@ export class BugReportStore {
   private proxyFiles = new Map<string, Map<string, string>>(); // "ns/pod" -> subpath -> absPath
   private istiodPods = new Map<string, IstiodInfo[]>();
   private clusterResources: ParsedResource[] | null = null;
+  private resourceIndex: ResourceIndex | null = null;
   private clusterLoadIssues: string[] = [];
   private namespaceResources: ParsedResource[] | null = null;
   private cachedModeInfo: DataPlaneModeInfo | null = null;
@@ -608,20 +619,44 @@ export class BugReportStore {
    * CRD that reuses an Istio kind name (EnvoyFilter, Gateway, ...) is not mixed in.
    */
   getClusterResources(filter?: { kind?: string; namespace?: string; name?: string; group?: string }): ParsedResource[] {
-    let resources = this.loadClusterResources();
-    if (filter?.kind) {
-      resources = resources.filter((r) => r.kind === filter.kind);
+    const resources = this.loadClusterResources();
+    if (!filter || (!filter.kind && filter.group === undefined && !filter.namespace && !filter.name)) return resources;
+    const index = this.resourceIndexFor(resources);
+    // The narrowest index bucket, then the remaining conditions over it: O(bucket), never O(all).
+    let bucket: ParsedResource[];
+    if (filter.kind && filter.namespace && filter.name) bucket = index.byKindNsName.get(`${filter.kind}\0${filter.namespace}\0${filter.name}`) ?? [];
+    else if (filter.kind && filter.namespace) bucket = index.byKindNs.get(`${filter.kind}\0${filter.namespace}`) ?? [];
+    else if (filter.kind && filter.group !== undefined) bucket = index.byKindGroup.get(`${filter.kind}\0${filter.group}`) ?? [];
+    else if (filter.kind) bucket = index.byKind.get(filter.kind) ?? [];
+    else if (filter.namespace) bucket = index.byNamespace.get(filter.namespace) ?? [];
+    else bucket = resources;
+    return bucket.filter((r) =>
+      (filter.group === undefined || apiGroup(r.apiVersion) === filter.group) &&
+      (!filter.namespace || r.metadata?.namespace === filter.namespace) &&
+      (!filter.name || r.metadata?.name === filter.name));
+  }
+
+  /** Lookup indexes over the parsed resources, built once per resource list (buckets keep dump order). */
+  private resourceIndexFor(resources: ParsedResource[]): ResourceIndex {
+    if (this.resourceIndex?.source === resources) return this.resourceIndex;
+    const index: ResourceIndex = { source: resources, byKind: new Map(), byKindGroup: new Map(), byKindNs: new Map(), byKindNsName: new Map(), byNamespace: new Map() };
+    const add = (map: Map<string, ParsedResource[]>, key: string, r: ParsedResource) => {
+      const bucket = map.get(key);
+      if (bucket) bucket.push(r);
+      else map.set(key, [r]);
+    };
+    for (const r of resources) {
+      const ns = r.metadata?.namespace;
+      add(index.byKind, r.kind, r);
+      add(index.byKindGroup, `${r.kind}\0${apiGroup(r.apiVersion)}`, r);
+      if (ns) {
+        add(index.byKindNs, `${r.kind}\0${ns}`, r);
+        add(index.byNamespace, ns, r);
+        if (r.metadata?.name) add(index.byKindNsName, `${r.kind}\0${ns}\0${r.metadata.name}`, r);
+      }
     }
-    if (filter?.group !== undefined) {
-      resources = resources.filter((r) => apiGroup(r.apiVersion) === filter.group);
-    }
-    if (filter?.namespace) {
-      resources = resources.filter((r) => r.metadata?.namespace === filter.namespace);
-    }
-    if (filter?.name) {
-      resources = resources.filter((r) => r.metadata?.name === filter.name);
-    }
-    return resources;
+    this.resourceIndex = index;
+    return index;
   }
 
   async getRawFile(relativePath: string): Promise<string | null> {
@@ -773,6 +808,8 @@ function isContinuationByte(byte: number | undefined): boolean {
 
 function addClusterDump(acc: ClusterAccumulator, resources: ParsedResource[]): void {
   for (const resource of resources) {
+    // Every consumer reads metadata.name; an item without metadata is not a resource.
+    if (!resource || typeof resource.metadata !== "object" || resource.metadata === null) continue;
     const key = resourceKey(resource);
     if (acc.seen.has(key)) continue;
     acc.seen.add(key);

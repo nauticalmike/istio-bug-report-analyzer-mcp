@@ -1,0 +1,71 @@
+id: DIAG-012
+name: Waypoint Referenced but Unusable
+category: ambient
+severity: critical
+# Runs in every mode: a use-waypoint label naming a missing or broken waypoint is a bug
+# wherever ambient labels exist, and sidecars ignore Service targetRefs policies too.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Namespaces, Services, ServiceEntries or pods carry istio.io/use-waypoint, but the waypoint
+  it names cannot serve them: the Gateway does not exist (in the namespace or in
+  istio.io/use-waypoint-namespace), is not a waypoint class, has no address or is not
+  Accepted/Programmed, has no running pod, does not admit the namespace (allowedRoutes), or
+  its istio.io/waypoint-for does not cover the traffic. Critical only when the workloads are
+  ambient and something targets the waypoint or its Services (a targetRefs policy, an
+  EnvoyFilter, an HTTPRoute or GRPCRoute); info in namespaces outside the mesh; otherwise a
+  warning. Objects of one namespace with the same label and problem are grouped, with a hint
+  when a Gateway of that name exists in another namespace or a similarly named waypoint exists
+  in the same one. Bindings to a waypoint whose namespace the bug report did not collect are
+  not judged. Also reported: istio.io/ingress-use-waypoint without a waypoint, use-waypoint on
+  a namespace that is not in ambient mode, ready waypoints nothing binds to (info, with the
+  resources their pods request), and targetRefs policies (AuthorizationPolicy,
+  RequestAuthentication, Telemetry, WasmPlugin) on Services with no usable waypoint: critical
+  for ambient Services, a warning for sidecar Services, and info when a selector policy of the
+  same kind already covers the Service's sidecar pods (pre-staged for a waypoint).
+rootCause: >
+  istiod binds an object to a waypoint only when the named Gateway exists, has
+  status.addresses, allows attachment from the object's namespace and serves the right
+  traffic type. Otherwise the binding is dropped (the Service's WaypointBound condition says
+  why) and traffic goes straight to the destination through ztunnel. targetRefs policies on a
+  Service attach only through a waypoint: ztunnel and sidecars ignore them, so without one
+  nothing enforces them.
+impact: >
+  L7 authorization, routing and telemetry meant for the waypoint are silently not applied.
+  An AuthorizationPolicy bound with targetRefs that nothing enforces leaves the Service open.
+signals:
+  - source:
+      type: mesh_check
+      check: waypoint_unusable
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Check the waypoint Gateway and the binding status on the Service or ServiceEntry (conditions WaypointBound / istio.io/WaypointBound)"
+    command: "kubectl get gateway -A -l istio.io/waypoint-for; istioctl waypoint status -n <namespace>; kubectl get svc <service> -n <namespace> -o yaml"
+    effort: low
+    risk: none
+  - order: 2
+    description: "Create the missing waypoint (istioctl waypoint apply), or fix istio.io/use-waypoint / istio.io/use-waypoint-namespace to name an existing one; for a shared waypoint in another namespace set allowedRoutes.namespaces.from: All or Selector"
+    command: "istioctl waypoint apply -n <namespace> --enroll-namespace"
+    effort: low
+    risk: low
+  - order: 3
+    description: "Match istio.io/waypoint-for to how the traffic is addressed (service for Service VIPs, workload for pod IPs, all for both)"
+    effort: low
+    risk: low
+  - order: 4
+    description: "Enrol the namespace in ambient (istio.io/dataplane-mode=ambient) before binding it to a waypoint, and remove istio.io/ingress-use-waypoint where there is no waypoint"
+    effort: low
+    risk: medium
+  - order: 5
+    description: "Until a Service has a waypoint, keep a selector-based policy of the same kind for its sidecar pods; delete waypoints nothing binds to, or bind them"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/troubleshoot-waypoint/"
+  - "https://istio.io/latest/docs/ambient/usage/waypoint/"
+enrichmentHints:
+  docsQuery: "waypoint not bound use-waypoint troubleshooting"

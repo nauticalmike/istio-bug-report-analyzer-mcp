@@ -1,0 +1,97 @@
+id: DIAG-017
+name: Ambient Install Inconsistent
+category: ambient
+severity: critical
+# Every mode: the check itself returns nothing on a mesh with no ambient footprint
+# (migration stage none), so a sidecar-only mesh never sees it.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  The ambient components in this cluster disagree with each other (see Affected): ztunnel
+  or ambient istio-cni is installed but the istiod it talks to does not enable ambient;
+  ambient workloads exist without a ztunnel or istio-cni DaemonSet; a ztunnel or istio-cni
+  DaemonSet is not ready on every node; istio-cni has ambient disabled or excludes an
+  ambient namespace; ztunnel's XDS_ADDRESS or CA_ADDRESS names a Service that does not
+  exist; or (info) ztunnel runs on every node with no ambient namespace or pod to serve.
+  When the only ztunnel or istio-cni pods missing or not ready sit on nodes whose Ready
+  condition is False or Unknown, the line is a warning about those nodes (and the ambient
+  pods on them), not an install inconsistency: recover or drain the node, do not reinstall.
+rootCause: >
+  Ambient mode needs four pieces configured together: istiod with PILOT_ENABLE_AMBIENT=true
+  (the ambient profile sets it; the istiod default is false), the istio-cni node agent with
+  ambient enabled, ztunnel pointed at that istiod, and namespaces or pods labelled
+  istio.io/dataplane-mode=ambient. Installing the charts separately, with different profiles
+  or revisions, or overriding excludeNamespaces leaves one of them out of step.
+impact: >
+  Critical once ambient workloads exist: istiod rejects ztunnel connections without
+  PILOT_ENABLE_AMBIENT ("ztunnel requires PILOT_ENABLE_AMBIENT=true"), pods on nodes without
+  a ready ztunnel or istio-cni lose mesh traffic or cannot be enrolled, and pods in a
+  namespace istio-cni excludes are not captured (from 1.30 the node agent also removes them
+  from the mesh). How excludeNamespaces acts depends on the istio-cni version: before 1.30
+  only the CNI plugin skips those pods at pod start and the node agent still enrolls them
+  late, racing the application (a warning: upgrading to 1.30 removes them from the mesh);
+  from 1.30 the node agent refuses to enroll them and removes enrolled ones (critical when
+  ambient pods run there). Before any workload is ambient these are warnings: the first namespace
+  labelled ambient will fail. A ztunnel with nothing enrolled only reserves its CPU and
+  memory requests on every node.
+signals:
+  # ambient_install in src/diagnostics/mesh-checks/ambient-install.ts:
+  # - not evaluated without cluster/k8s-resources;
+  # - severity per issue from migrationStage (critical when ambient workloads exist,
+  #   warning before; nothing at stage none; the "nothing enrolled" issue is info);
+  # - "no DaemonSet" and "nothing enrolled" only when every namespace was collected
+  #   (1.30+ bug-report --include scopes cluster/k8s-resources to those namespaces);
+  # - values set through valueFrom, a Secret, or a ConfigMap missing from the dump are not judged;
+  # - DaemonSet shortfalls explained by NotReady/Unknown nodes (Node objects plus a pod dump
+  #   of the DaemonSet's namespace) are a warning per node set, with the ambient pods there;
+  # - excludeNamespaces: one line per excluded ambient namespace, with its ambient and
+  #   enrolled (ambient.istio.io/redirection=enabled) pod counts; the version is read from
+  #   the install-cni image tag (else the istio-cni pod versions);
+  # - lines are sorted most severe first; nothing is capped here.
+  - source:
+      type: mesh_check
+      check: ambient_install
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Install or upgrade istiod, istio-cni and ztunnel with the ambient profile, one
+      revision for all three (Helm: --set profile=ambient on the istiod, istio-cni and
+      ztunnel charts, and the same revision value). For istiod this sets
+      PILOT_ENABLE_AMBIENT=true; for istio-cni it sets ambient.enabled=true.
+    command: "istioctl install --set profile=ambient   # or the Helm charts with profile=ambient"
+    effort: low
+    risk: medium
+  - order: 2
+    description: >-
+      Point ztunnel at the istiod revision it should use (Helm ztunnel values revision, or
+      xdsAddress/caAddress) and confirm the Service exists in the Istio namespace.
+    command: "kubectl -n istio-system get svc -l app=istiod; kubectl -n istio-system get ds ztunnel -o jsonpath='{.spec.template.spec.containers[0].env}'"
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      Remove ambient namespaces from istio-cni excludeNamespaces (Helm values
+      excludeNamespaces; keep kube-system), and bring the ztunnel and istio-cni DaemonSets
+      to ready on every node (check taints, tolerations, the system-node-critical
+      priority class quota and pod events). A line that names a node not ready is a node
+      problem: recover or drain the node (kubectl describe node) instead of reinstalling.
+    command: "kubectl -n istio-system get cm istio-cni-config -o yaml; kubectl -n istio-system get ds"
+    effort: low
+    risk: low
+  - order: 4
+    description: >-
+      If ambient is not planned for this cluster, uninstall ztunnel (and set
+      ambient.enabled=false on istio-cni) to free the per-node requests; otherwise ignore
+      the info line until the first namespace is enrolled.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/install/"
+  - "https://istio.io/latest/docs/ambient/install/helm/"
+  - "https://istio.io/latest/docs/setup/additional-setup/cni/"
+enrichmentHints:
+  docsQuery: "ambient install PILOT_ENABLE_AMBIENT istio-cni ambient.enabled ztunnel"

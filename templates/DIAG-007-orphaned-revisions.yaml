@@ -1,0 +1,103 @@
+id: DIAG-007
+name: Orphaned Revisions, Webhooks or Revision Tags
+category: config
+severity: critical
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Istio revision objects no longer line up with the running control plane. The entries
+  under Affected name each problem: an injector or Istio validating webhook
+  (istiod-default-validator, istio-validator-<rev>-<ns>) calling an istiod Service that is
+  gone or has no ready pod, a namespace or pod whose istio.io/rev (or istio-injection=enabled)
+  label no injector webhook serves, injected pods on a revision with no running istiod,
+  leftovers of a revision with no live istiod Deployment (ConfigMaps, Service, HPA,
+  validator webhook; a Deployment scaled to 0 with no running pod counts as gone), a default
+  revision and "default" tag that point to different revisions, pods whose own istio.io/rev
+  label is overridden by their namespace, pods still on the revision they were injected with
+  after the namespace moved on (restart pending), and namespaces two injector webhooks both
+  match. Each entry carries its own severity, by what breaks today: a failurePolicy Fail
+  webhook is critical only when it matches a namespace with a live pod or workload template
+  (injector) or Istio config it validates; a stale label is info where every pod is already
+  without a proxy, or on an ambient namespace.
+rootCause: >
+  Canary upgrades and revision tags leave objects behind when a step is skipped: the old
+  revision is uninstalled before namespaces are relabelled and pods restarted, a tag is
+  left pointing at a removed revision, or `istioctl tag set default` is applied next to an
+  install that still owns istio-injection=enabled. The API server calls every injector
+  webhook whose selectors match a pod, so these leftovers decide which revision (if any)
+  injects new pods.
+impact: >
+  An injector webhook with failurePolicy Fail whose istiod is gone makes the API server
+  reject every pod create it matches, including Deployment rollouts and scale-ups; a
+  validating webhook with Fail rejects every create and update of the Istio config it
+  selects, and with Ignore invalid config is accepted unvalidated. Pods
+  on a revision with no running istiod stop receiving configuration and cannot rotate
+  their workload certificate, so they fail once it expires. Namespaces no webhook serves
+  start new pods without a sidecar, which breaks STRICT mTLS and authorization.
+signals:
+  # orphaned_revisions in src/diagnostics/mesh-checks/revisions.ts. Webhook rules evaluate
+  # the injector webhooks' own namespaceSelector/objectSelector against the namespace and pod
+  # labels; istio-validator-<rev> only selects config labelled istio.io/rev=<rev> (its
+  # objectSelector, istio-discovery validatingwebhookconfiguration.yaml), so it is judged by the
+  # Istio config it selects. Rules whose input is missing (no webhook dump, no cluster/k8s-resources, no
+  # istiod Deployment as on a remote cluster) are listed as not evaluated, never as passed;
+  # pods are only judged in namespaces the pod dump covers.
+  - source:
+      type: mesh_check
+      check: orphaned_revisions
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      List the revisions and tags and what uses them. Every webhook, tag and namespace label
+      under Affected should map to a revision with a running istiod.
+    command: "istioctl x revision list && istioctl tag list && kubectl get mutatingwebhookconfigurations -l app=sidecar-injector --show-labels"
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Point tags at a live revision, or remove tags and webhooks whose revision is gone
+      (first make sure no namespace still uses them). For a deactivated or orphaned
+      per-revision injector or istio-validator webhook, uninstall that revision or delete the
+      webhook configuration; for istiod-default-validator, retarget it with
+      `istioctl tag set default --revision <live-revision> --overwrite`.
+    command: "istioctl tag set <tag> --revision <live-revision> --overwrite   # or: istioctl tag remove <tag>"
+    effort: low
+    risk: medium
+  - order: 3
+    description: >-
+      Relabel namespaces (and pods carrying their own istio.io/rev) to a revision or tag that
+      exists, or remove a stale label from namespaces meant to stay without sidecars or in
+      ambient. istio-injection takes precedence over istio.io/rev, so remove it when moving a
+      namespace to a revision; for istio-injection=enabled, make sure a "default" tag or
+      default-revision install exists.
+    command: "kubectl label namespace <ns> istio-injection- istio.io/rev=<revision-or-tag> --overwrite"
+    effort: low
+    risk: medium
+  - order: 4
+    description: >-
+      Restart the workloads listed as on a dead revision or restart pending so they are
+      re-injected by the revision their namespace selects, then confirm with proxy-status.
+      Only then remove the old revision and its leftovers (istio-<rev> and
+      istio-sidecar-injector-<rev> ConfigMaps, istiod-<rev> Service and HPA, the
+      istio-validator-<rev> webhook, a Deployment scaled to 0).
+    command: "kubectl rollout restart deployment -n <ns> && istioctl proxy-status"
+    effort: medium
+    risk: medium
+  - order: 5
+    description: >-
+      If the default revision and the "default" tag disagree, make them the same: retarget
+      the tag with `istioctl tag set default --revision <revision> --overwrite`, which also
+      repoints istiod-default-validator.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/setup/upgrade/canary/"
+  - "https://istio.io/latest/docs/setup/upgrade/canary/#stable-revision-labels"
+  - "https://istio.io/latest/docs/reference/commands/istioctl/#istioctl-tag"
+  - "https://istio.io/latest/docs/ops/common-problems/injection/"
+enrichmentHints:
+  docsQuery: "istio canary upgrade revision tags orphaned webhook"

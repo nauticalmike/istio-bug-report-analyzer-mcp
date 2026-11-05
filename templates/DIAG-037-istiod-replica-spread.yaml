@@ -1,0 +1,72 @@
+id: DIAG-037
+name: Istiod Replicas Not Spread
+category: config
+severity: warning
+description: >
+  istiod Deployments run two or more replicas (spec.replicas, or the HPA minimum when an
+  HPA targets the Deployment) but set no topologySpreadConstraints or podAntiAffinity, on a
+  cluster whose dump lists more than one node (see Affected). The scheduler may place the
+  replicas on one node or zone. Single-replica istiods are reported by DIAG-003; the
+  capacity of each replica (clients per core, OOM kills, rate limiting) by DIAG-020.
+rootCause: >
+  The istiod chart leaves topologySpreadConstraints and affinity empty by default, so the
+  replicas are spread only by the scheduler's default scoring, which does not guarantee
+  distinct nodes or zones.
+impact: >
+  Info while the replicas happen to run apart: a later reschedule can put them together.
+  Warning when every running replica in the pod dump is already on one node: a single
+  node drain or failure stops every replica at once, so config pushes and sidecar
+  injection stop until istiod is rescheduled.
+signals:
+  # istiod_replica_spread in src/diagnostics/mesh-checks/control-plane.ts:
+  # - istiod Deployments (label app=istiod) with 2+ effective replicas (HPA minReplicas when
+  #   an HPA targets the Deployment, else spec.replicas) and no topologySpreadConstraints or
+  #   podAntiAffinity in the pod template; judged only when the dump lists 2+ nodes;
+  # - info, or warning when 2+ live replicas in the pod dump share one node; the info line
+  #   shows the nodes (and zones, from Node labels) the replicas run on now;
+  # - with no istiod Deployment in the dump, the live istiod pods grouped by owner (ReplicaSet,
+  #   else revision label and workload), judged from their own spec (topologySpreadConstraints,
+  #   affinity.podAntiAffinity copied from the template) with the same info/warning lines; 2+
+  #   replicas on one node stay a warning even with a soft spread rule;
+  # - not evaluated with no istiod Deployment or pod in the cluster dump, or with no Node
+  #   objects (unless the pods already show replicas sharing a node).
+  - source:
+      type: mesh_check
+      check: istiod_replica_spread
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Spread the replicas across nodes (and zones when the cluster has several) with
+      topologySpreadConstraints or a preferred podAntiAffinity on the istiod pod template.
+      The istiod Helm chart takes topologySpreadConstraints and affinity values (top level
+      from 1.24, under pilot. up to 1.23); for IstioOperator use
+      spec.components.pilot.k8s.affinity.
+    yaml: |
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: istiod
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: istiod
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Check where the replicas run now.
+    command: "kubectl get pods -n istio-system -l app=istiod -o wide"
+    effort: trivial
+    risk: none
+references:
+  - "https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/"
+  - "https://istio.io/latest/docs/setup/additional-setup/customize-installation/"
+enrichmentHints:
+  docsQuery: "istiod high availability topologySpreadConstraints podAntiAffinity replicas"

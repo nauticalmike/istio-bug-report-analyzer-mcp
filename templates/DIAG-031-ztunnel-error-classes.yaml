@@ -1,0 +1,110 @@
+id: DIAG-031
+name: ztunnel Connection Errors by Class
+category: connectivity
+severity: critical
+# Every mode: the check returns nothing on a mesh with no ambient footprint.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  ztunnel logged failed connections or its own errors (see Affected). Each line is one error
+  class with its count, ztunnel pods, direction, time window, top destination Services,
+  the number of distinct source addresses and what the class usually means: AuthorizationPolicy
+  gaps, STRICT PeerAuthentication against plaintext clients, explicit DENY matches, HBONE
+  blocked by a NetworkPolicy, HTTP 401 (the destination ztunnel's authorization deny), TLS
+  failures, connections without a workload certificate, unknown destinations or waypoints,
+  workloads missing from WDS, and xDS messages over a gRPC size limit (istiod refusing
+  ztunnel's request, or a response too large for ztunnel). Known noise (load balancer health
+  checks on the HBONE port, client disconnects, connection drain, metrics scrapes refused on
+  metrics ports, connections to the kubelet port 10250) is listed last. Certificate fetch failures (DIAG-023) and xDS rate-limit
+  refusals (DIAG-020) are only cross-referenced.
+rootCause: >
+  ztunnel writes an access log line for every connection it proxies and an error field when
+  it fails; the error text names why (proxy::Error in ztunnel). Denials come from
+  AuthorizationPolicy (and the policies istiod generates for STRICT PeerAuthentication),
+  timeouts on 15008 from NetworkPolicy or firewalls, 401s from the destination ztunnel's
+  authorization check, and lookups that fail from WDS state ztunnel has not received yet.
+impact: >
+  Each class is a set of connections that failed: requests the applications saw as resets,
+  refusals or timeouts. Policy classes may be intended; the guidance on each line says what
+  to check. Counts cover only the bug report's collection window, and each connection can
+  be logged by both the source and the destination ztunnel.
+signals:
+  # ztunnel_error_classes in src/diagnostics/mesh-checks/ambient-dataplane.ts with the
+  # parser in src/diagnostics/sources/ztunnel-log.ts:
+  # - one streamed pass over proxies/<ns>/ztunnel-*/istio-proxy.log (plain and JSON log
+  #   formats), parsing only warn and error lines;
+  # - not evaluated when no ztunnel log was collected or readable on a mesh with ambient
+  #   footprint; nothing without ambient footprint;
+  # - one line per class, never per pod or per connection; source addresses are counted,
+  #   never printed; destinations without dst.service are resolved through the archive's
+  #   Service clusterIPs and pod IPs, public addresses without a Service are "external";
+  #   unclassified error texts are grouped with addresses and numbers masked and secrets
+  #   redacted, the 10 largest shown and the rest summarised;
+  # - scrapes (source workload, identity or pod named like Prometheus and similar scrapers)
+  #   refused or timed out on metrics ports (15020, 15090, common exporter ports, ports named
+  #   for metrics) are noise;
+  # - refused or timed-out connections to port 10250 (kubelet) are noise; destination IPs
+  #   resolve to Node InternalIPs, and a private 10250 address no Node has is "a node not in
+  #   the dump (scaled down)";
+  # - a 401 class whose every line comes from a metrics scraper is info and says so; an
+  #   "XDS client connection error" class with at most 5 lines per pod within 10 minutes is
+  #   info (brief reconnect);
+  # - not evaluated when every ztunnel log is of a pod no longer in the dump (those files are
+  #   not read, only counted), or when ztunnel dirs hold only config dumps;
+  # - certificate fetch lines (DIAG-023) and xDS rate-limit lines (DIAG-020) get one
+  #   cross-reference line, and only when other classes are listed;
+  # - the istio-cni connection line belongs to DIAG-030;
+  # - order: severity, then count; noise classes last.
+  - source:
+      type: mesh_check
+      check: ztunnel_error_classes
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Policy rejections: compare the ALLOW policies selecting the destinations listed with
+      the callers (and allow Prometheus and kubelet probes where they are needed); for STRICT
+      denials enroll the plaintext clients in the mesh or relax PeerAuthentication for them.
+    command: "kubectl get authorizationpolicies,peerauthentications -A"
+    effort: medium
+    risk: medium
+  - order: 2
+    description: >-
+      HBONE timeouts: allow TCP 15008 between pods and nodes in NetworkPolicies, security
+      groups and firewalls (DIAG-018 checks the NetworkPolicies in the archive).
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      HTTP 401: read the policy rejection the destination ztunnel logged for the same
+      connections and fix the AuthorizationPolicy or PeerAuthentication. TLS failures: make
+      sure every cluster and ztunnel trusts the same root (shared root CA or trust bundle),
+      especially across clusters and during CA rotation.
+    effort: medium
+    risk: medium
+  - order: 4
+    description: >-
+      "grpc: received message larger than max (N vs. M)" on ztunnel: istiod's gRPC server
+      refused ztunnel's request. Raise ISTIO_GPRC_MAXRECVMSGSIZE (bytes) in istiod's
+      environment (istiod Helm chart env; values.pilot.env with istioctl), or reduce what
+      istiod sends ztunnel with discoverySelectors; setting it on the ztunnel DaemonSet does
+      not raise istiod's limit. "message length too large" is ztunnel's own decode limit
+      (200 MiB in current releases, not configurable): reduce what istiod sends ztunnel.
+    command: "helm upgrade istiod istio/istiod -n istio-system --reuse-values --set env.ISTIO_GPRC_MAXRECVMSGSIZE=16777216"
+    effort: low
+    risk: low
+  - order: 5
+    description: >-
+      Health-check noise: point load balancer health checks at port 15021 (/healthz/ready)
+      instead of the HBONE port 15008.
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/troubleshoot-ztunnel/"
+  - "https://istio.io/latest/docs/ambient/usage/l4-policy/"
+  - "https://istio.io/latest/docs/ambient/usage/networkpolicy/"
+enrichmentHints:
+  docsQuery: "ztunnel access log error policy rejection allow policies exist but none allowed HBONE 15008"

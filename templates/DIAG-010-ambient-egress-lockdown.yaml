@@ -1,0 +1,79 @@
+id: DIAG-010
+name: Egress Lockdown and Sidecar Scoping Lost in Ambient
+category: security
+severity: critical
+description: >
+  Egress controls that sidecars enforce do not apply to ambient workloads: ztunnel ignores
+  meshConfig outboundTrafficPolicy, Sidecar resources and ServiceEntry exportTo, and a
+  wildcard-host ServiceEntry applies to ambient clients only through a waypoint. The settings
+  listed under Affected are already lost for ambient workloads, or will be lost as the
+  workloads migrate.
+rootCause: >
+  outboundTrafficPolicy (REGISTRY_ONLY) and Sidecar egress.hosts are Envoy sidecar
+  configuration. ztunnel forwards traffic to any destination and does not read Sidecar
+  resources. ambient does not implement exportTo (Istio 1.31 adds
+  meshConfig.serviceEntryVisibility, which it enforces).
+impact: >
+  Ambient workloads can reach any external host despite a REGISTRY_ONLY lockdown, and
+  ServiceEntries meant for one namespace are visible mesh-wide. Wildcard ServiceEntries do
+  nothing for ambient clients until bound to a waypoint.
+signals:
+  # egress_lockdown_lost in src/diagnostics/mesh-checks/ambient-policy.ts:
+  # - not evaluated without cluster/crs or cluster/k8s-resources;
+  # - nothing at migration stage none;
+  # - REGISTRY_ONLY (mesh or Sidecar) is critical when ambient workloads are in scope,
+  #   warning while they are still sidecars; a plain scoping Sidecar on ambient pods is info;
+  # - a catch-all Sidecar (every egress entry allows */*, no ingress, no outboundTrafficPolicy)
+  #   loses nothing and is left out;
+  # - exportTo is reported only when a consumer is ambient (stage partial or ambient, or a
+  #   migration is assumed) and skipped when meshConfig.serviceEntryVisibility is set;
+  # - one object name copied into several namespaces with the same problem is one line, listed
+  #   under each of those namespaces in the readiness report.
+  - source:
+      type: mesh_check
+      check: egress_lockdown_lost
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Route external traffic through an egress waypoint: declare each allowed external host in
+      a ServiceEntry in the egress namespace and bind it to the waypoint with the
+      istio.io/use-waypoint label; enforce L7 egress policy there with targetRefs.
+    yaml: |
+      apiVersion: networking.istio.io/v1
+      kind: ServiceEntry
+      metadata:
+        name: <external-host>
+        namespace: istio-egress
+        labels:
+          istio.io/use-waypoint: waypoint
+      spec:
+        hosts: ["api.example.com"]
+        ports:
+          - number: 443
+            name: tls
+            protocol: TLS
+        resolution: DNS
+    effort: medium
+    risk: medium
+  - order: 2
+    description: >-
+      Enforce the lockdown below the mesh: a default-deny egress NetworkPolicy in each ambient
+      namespace that allows DNS, the egress waypoint namespace and in-cluster destinations
+      (keep HBONE port 15008 open).
+    effort: medium
+    risk: medium
+  - order: 3
+    description: >-
+      Replace ServiceEntry exportTo with meshConfig.serviceEntryVisibility (Istio 1.31+), or
+      keep namespace-restricted ServiceEntries for sidecar workloads only. Delete Sidecar
+      resources that select only ambient workloads.
+    effort: low
+    risk: low
+references:
+  - "https://ambientmesh.io/docs/traffic-management/egress/migrate-sidecar/"
+  - "https://istio.io/latest/docs/ambient/usage/networkpolicy/"
+  - "https://istio.io/latest/docs/ambient/migrate/"
+enrichmentHints:
+  docsQuery: "ambient egress waypoint REGISTRY_ONLY ServiceEntry"

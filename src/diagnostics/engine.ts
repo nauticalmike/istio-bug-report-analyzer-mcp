@@ -10,6 +10,7 @@ import { formatMB } from "../archive/heap-guard.js";
 import { listLogSources } from "../tools/log-sources.js";
 import { scanLogSources } from "../tools/log-scan.js";
 import { MESH_CHECKS } from "./mesh-checks/index.js";
+import type { MeshContext } from "./mesh-model.js";
 import {
   clusterSectionGap,
   clusterSectionOf,
@@ -29,9 +30,11 @@ const SEVERITY_RANK: Record<Severity, number> = { info: 0, warning: 1, critical:
 // Sources that compute a list of issues: the signal value is the list (null when empty)
 // and each issue's detail is reported as an affected resource. A source that cannot run on
 // the archive (data missing) returns NotEvaluated: its templates are listed by
-// getNotEvaluated() instead of firing or passing silently.
+// getNotEvaluated() instead of firing or passing silently. A source may be async (mesh checks
+// that stream logs); the engine awaits it once per run and caches the settled result.
 type IssueResult = Issue[] | NotEvaluated;
-const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportStore, source: Signal["source"]) => IssueResult>> = {
+type IssueCompute = (store: BugReportStore, source: Signal["source"], ctx: MeshContext) => IssueResult | Promise<IssueResult>;
+const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], IssueCompute>> = {
   version_skew: (store) => findVersionSkew(store.getEffectiveVersions()),
   version_support: (store, source) =>
     source.type === "version_support"
@@ -46,11 +49,17 @@ const ISSUE_SOURCES: Partial<Record<Signal["source"]["type"], (store: BugReportS
   demo_profile: (store) => demoProfileEvidence(store),
   istiod_replicas: (store) => singleReplicaIstiods(store),
   sidecar_scope: (store) => sidecarScopeGaps(store),
-  mesh_check: (store, source) => {
+  mesh_check: async (store, source, ctx) => {
     if (source.type !== "mesh_check") return [];
     const check = MESH_CHECKS[source.check];
     if (!check) return { notEvaluated: `not evaluated: unknown mesh check "${source.check}"` };
-    return check(store);
+    // One check failing (a throw, or a rejected Promise) on an unexpected resource shape must
+    // not end the whole run.
+    try {
+      return await check(store, ctx);
+    } catch (e) {
+      return { notEvaluated: `not evaluated: the check failed on this archive (${e instanceof Error ? e.message : String(e)})` };
+    }
   },
 };
 
@@ -66,25 +75,32 @@ function captureSourceText(store: BugReportStore): string | undefined {
   return source ? CAPTURE_SOURCES[source] : undefined;
 }
 
-/** Per-run memo of issue sources, keyed by the source definition. */
-type IssueCache = Map<string, IssueResult>;
+/** Per-run memo of issue sources, keyed by the source definition, with the run's MeshContext. */
+interface IssueCache {
+  results: Map<string, IssueResult>;
+  ctx: MeshContext;
+}
 
-function resultFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): IssueResult | null {
+/** Computes (and caches) an issue source's result; null for other sources. */
+async function resultFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): Promise<IssueResult | null> {
   const compute = ISSUE_SOURCES[source.type];
   if (!compute) return null;
   const key = JSON.stringify(source);
-  let result = cache.get(key);
+  let result = cache.results.get(key);
   if (!result) {
-    result = compute(store, source);
-    cache.set(key, result);
+    result = await compute(store, source, cache.ctx);
+    cache.results.set(key, result);
   }
   return result;
 }
 
-/** The issues of an issue source (empty when it was not evaluated); null for other sources. */
-function issuesFor(source: Signal["source"], store: BugReportStore, cache: IssueCache): Issue[] | null {
-  const result = resultFor(source, store, cache);
-  if (!result) return null;
+/**
+ * The issues of an issue source (empty when it was not evaluated); null for other sources.
+ * Reads the run's cache only: run() settles every signal's source before it evaluates any.
+ */
+function issuesFor(source: Signal["source"], cache: IssueCache): Issue[] | null {
+  if (!ISSUE_SOURCES[source.type]) return null;
+  const result = cache.results.get(JSON.stringify(source));
   return Array.isArray(result) ? result : [];
 }
 
@@ -133,6 +149,16 @@ export interface NotEvaluatedTemplate {
   reason: string;
 }
 
+/** Options of one engine run. */
+export interface RunOptions extends MeshContext {
+  /** Only templates of these categories. */
+  categories?: string[];
+  /** Skip templates whose appliesTo excludes this data plane mode. */
+  mode?: DataPlaneMode;
+  /** Only templates this returns true for. */
+  select?: (template: DiagnosticTemplate) => boolean;
+}
+
 export class DiagnosticEngine {
   private templates: DiagnosticTemplate[] = [];
   private notEvaluated: NotEvaluatedTemplate[] = [];
@@ -158,29 +184,50 @@ export class DiagnosticEngine {
     this.templates.push(template);
   }
 
+  /** A loaded template by id. */
+  getTemplate(id: string): DiagnosticTemplate | undefined {
+    return this.templates.find((t) => t.id === id);
+  }
+
   /** Templates of the last run() that were skipped or could not be evaluated, with why. */
   getNotEvaluated(): NotEvaluatedTemplate[] {
     return this.notEvaluated;
   }
 
-  async run(store: BugReportStore, categories?: string[], mode?: DataPlaneMode): Promise<DiagnosticFinding[]> {
+  /**
+   * Runs the templates on the store. `options` is either RunOptions or, positionally, the
+   * categories (then `mode` and `select`). The run's MeshContext (assumeMigration) reaches
+   * the mesh checks only, never the store, so concurrent runs stay independent.
+   */
+  async run(
+    store: BugReportStore,
+    options?: RunOptions | string[],
+    mode?: DataPlaneMode,
+    select?: (template: DiagnosticTemplate) => boolean,
+  ): Promise<DiagnosticFinding[]> {
+    const opts: RunOptions = Array.isArray(options) || options === undefined ? { categories: options, mode, select } : options;
+    const { categories } = opts;
+    mode = opts.mode;
+    select = opts.select;
     const findings: DiagnosticFinding[] = [];
-    const issueCache: IssueCache = new Map();
+    const issueCache: IssueCache = { results: new Map(), ctx: opts.assumeMigration ? { assumeMigration: true } : {} };
     this.notEvaluated = [];
 
     for (const template of this.templates) {
+      if (select && !select(template)) continue;
       if (categories && !categories.includes(template.category)) continue;
       if (template.appliesTo && mode && !template.appliesTo.includes(mode)) continue;
 
-      const reason = template.signals
-        .map((s) => {
-          const missing = missingInput(s.source, store);
-          if (missing) return missing;
-          const result = resultFor(s.source, store, issueCache);
-          return result && !Array.isArray(result) ? result.notEvaluated : null;
-        })
-        .find((r) => r);
+      // Every signal's issue source is settled here (in order), so later reads hit the cache.
+      let reason: string | null = null;
+      for (const s of template.signals) {
+        const missing = missingInput(s.source, store);
+        const result = missing ? null : await resultFor(s.source, store, issueCache);
+        reason ??= missing ?? (result && !Array.isArray(result) ? result.notEvaluated : null);
+      }
       if (reason) {
+        // Checks that join several sources' reasons ("not evaluated: a; not evaluated: b") say it once.
+        reason = reason.replace(/([;,]\s*)not evaluated: /g, "$1");
         this.notEvaluated.push({ templateId: template.id, templateName: template.name, reason });
         continue;
       }
@@ -200,12 +247,14 @@ export class DiagnosticEngine {
       }
 
       if (allMatch) {
+        const issues = this.collectIssues(template, store, issueCache);
         findings.push({
           templateId: template.id,
           templateName: template.name,
           category: template.category,
-          severity: this.findingSeverity(template, store, issueCache),
-          affectedResources: this.collectAffectedResources(template, store, issueCache),
+          severity: this.findingSeverity(template, issueCache),
+          affectedResources: issues.map((i) => i.detail),
+          ...(template.signals.some((s) => ISSUE_SOURCES[s.source.type]) ? { issues } : {}),
           description: template.description,
           rootCause: template.rootCause,
           impact: template.impact,
@@ -231,7 +280,7 @@ export class DiagnosticEngine {
     op: Signal["check"]["op"],
     unread: string[],
   ): Promise<unknown> {
-    const issues = issuesFor(source, store, cache);
+    const issues = issuesFor(source, cache);
     if (issues) return issues.length > 0 ? issues : null;
     switch (source.type) {
       case "analyze": {
@@ -295,24 +344,33 @@ export class DiagnosticEngine {
   }
 
   /** The template's severity, lowered to the most severe issue when every issue states one. */
-  private findingSeverity(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): Severity {
-    const issues = template.signals.flatMap((s) => issuesFor(s.source, store, cache) ?? []);
+  private findingSeverity(template: DiagnosticTemplate, cache: IssueCache): Severity {
+    const issues = template.signals.flatMap((s) => issuesFor(s.source, cache) ?? []);
     if (issues.length === 0 || issues.some((i) => !i.severity)) return template.severity;
     const worst = issues.reduce<Severity>((w, i) => (SEVERITY_RANK[i.severity!] > SEVERITY_RANK[w] ? i.severity! : w), "info");
     return SEVERITY_RANK[worst] < SEVERITY_RANK[template.severity] ? worst : template.severity;
   }
 
-  private collectAffectedResources(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): string[] {
-    const affected: string[] = [];
+  /** The finding's issues in order, one per distinct detail (the first one wins). */
+  private collectIssues(template: DiagnosticTemplate, store: BugReportStore, cache: IssueCache): NonNullable<DiagnosticFinding["issues"]> {
+    const out = new Map<string, NonNullable<DiagnosticFinding["issues"]>[number]>();
+    const add = (i: Issue) => {
+      if (out.has(i.detail)) return;
+      out.set(i.detail, {
+        detail: i.detail,
+        ...(i.severity ? { severity: i.severity } : {}),
+        ...(i.namespace ? { namespace: i.namespace } : {}),
+        ...(i.namespaces !== undefined ? { namespaces: i.namespaces } : {}),
+      });
+    };
     for (const signal of template.signals) {
       if (signal.source.type === "analyze") {
-        const results = store.getAnalyzeResults({ code: signal.source.code });
-        affected.push(...results.map((r) => r.resource));
+        for (const r of store.getAnalyzeResults({ code: signal.source.code })) add({ detail: r.resource });
       } else {
-        affected.push(...(issuesFor(signal.source, store, cache) ?? []).map((i) => i.detail));
+        for (const i of issuesFor(signal.source, cache) ?? []) add(i);
       }
     }
-    return [...new Set(affected)];
+    return [...out.values()];
   }
 }
 

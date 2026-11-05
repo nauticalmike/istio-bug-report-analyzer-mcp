@@ -4,7 +4,9 @@ category: config
 severity: critical
 description: >
   The Istio installation appears to use the demo profile, which is intended
-  for learning and evaluation only.
+  for learning and evaluation only. With the demo evidence it also lists trace sampling of
+  50% or more from Telemetry randomSamplingPercentage, meshConfig.defaultConfig.tracing.sampling
+  or PILOT_TRACE_SAMPLING; outside the demo profile DIAG-033 reports those.
 rootCause: >
   Istio was installed with --set profile=demo or equivalent settings.
   Demo profile enables all features with minimal resources.
@@ -13,7 +15,7 @@ impact: >
   sampling, an egress gateway, access logging to stdout and no autoscaling for istiod
   or the gateways.
 signals:
-  # Requires istiod requests at the demo values (10m / 100Mi) plus at least one other
+  # Demo evidence requires istiod requests at the demo values (10m / 100Mi) plus at least one other
   # demo-profile setting. Access logging to stdout alone never triggers this.
   - source:
       type: demo_profile
@@ -29,8 +31,9 @@ remediation:
     effort: low
     risk: low
   - order: 3
-    description: "Lower trace sampling (PILOT_TRACE_SAMPLING / meshConfig.defaultConfig.tracing.sampling) to a production rate such as 1%"
+    description: "Lower trace sampling (Telemetry randomSamplingPercentage, meshConfig.defaultConfig.tracing.sampling, PILOT_TRACE_SAMPLING) to a production rate such as 1%, and set it in one place"
     effort: trivial
     risk: none
 references:
   - "https://istio.io/latest/docs/setup/additional-setup/config-profiles/"
+  - "https://istio.io/latest/docs/tasks/observability/distributed-tracing/sampling/"

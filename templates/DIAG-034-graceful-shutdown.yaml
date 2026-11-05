@@ -1,0 +1,59 @@
+id: DIAG-034
+name: Graceful-Shutdown Budget Too Short or Too Long
+category: connectivity
+severity: warning
+description: >
+  Per workload (pods grouped by their Deployment, Argo Rollout or other owner; identical lines of
+  several workloads merged; pause-image placeholder pods skipped): terminationGracePeriodSeconds
+  (default 30) below what shutdown needs: for a native sidecar, the app's preStop sleep plus
+  the proxy's terminationDrainDuration plus 5 s (the proxy is stopped after the app); for a
+  classic sidecar the larger of the two plus 5 s (both stop at once); for gateways the drain
+  plus 5 s. The drain comes from the proxy.istio.io/config annotation, else
+  meshConfig.defaultConfig, else Istio's 5 s default. Also reported: a terminationDrainDuration
+  that EXIT_ON_ZERO_ACTIVE_CONNECTIONS=true makes the proxy ignore (it waits
+  MINIMUM_DRAIN_DURATION, default 5 s, then exits once connections reach zero), and drains of
+  600 s or more (once, mesh-wide, when they come from meshConfig; the grace-period line is then
+  not repeated); a classic sidecar whose drain ends before the app's preStop sleep, so the proxy
+  exits while the app still serves (with EXIT_ON_ZERO_ACTIVE_CONNECTIONS, the proxy exits once
+  its active connections reach 0 after MINIMUM_DRAIN_DURATION, so connections opened during the
+  rest of the preStop fail; the ignored drain is named on the same line). A meshConfig drain of
+  5 s is Istio's default (debug/mesh lists defaults). istiod-generated waypoints with
+  terminationGracePeriodSeconds 2 from a waypoint template before 1.28 (the waypoint proxy
+  image's version, else its revision's control plane) are one info line: Istio's waypoint
+  template hardcoded 2 s until 1.28 (istio/istio #55799). When pod specs cover under 10% of 10
+  or more proxy dirs, a "partial" info line says how many were checked.
+rootCause: >
+  The kubelet kills containers still running when the grace period ends, so a drain or preStop
+  longer than it is cut short; very long drains keep terminating pods around for minutes.
+impact: >
+  503s and connection resets on rollouts and scale-down when the proxy is killed mid-drain;
+  rollouts and node drains stalled by long drains.
+signals:
+  - source:
+      type: mesh_check
+      check: graceful_shutdown
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: "Raise terminationGracePeriodSeconds above preStop + terminationDrainDuration + 5 s, or shorten the drain"
+    yaml: |
+      metadata:
+        annotations:
+          proxy.istio.io/config: |
+            terminationDrainDuration: 20s
+      spec:
+        terminationGracePeriodSeconds: 45
+    effort: low
+    risk: low
+  - order: 2
+    description: "With EXIT_ON_ZERO_ACTIVE_CONNECTIONS, tune MINIMUM_DRAIN_DURATION instead of terminationDrainDuration; for classic sidecars, make the drain cover the app's preStop or move to native sidecars"
+    effort: trivial
+    risk: low
+  - order: 3
+    description: "For istiod-generated waypoints before 1.28, upgrade to 1.28 or later, or patch terminationGracePeriodSeconds through a deployment overlay in the Gateway's infrastructure.parametersRef ConfigMap"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/reference/config/istio.mesh.v1alpha1/#ProxyConfig"
+  - "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination"

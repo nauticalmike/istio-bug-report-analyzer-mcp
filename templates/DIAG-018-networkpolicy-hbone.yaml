@@ -1,0 +1,113 @@
+id: DIAG-018
+name: NetworkPolicy Blocks HBONE or Ambient Health Probes
+category: connectivity
+severity: critical
+# Every mode: the check returns nothing on a mesh with no ambient footprint.
+appliesTo:
+  - sidecar
+  - interop
+  - ambient
+description: >
+  Kubernetes NetworkPolicies select ambient pods (or waypoints, or sidecars that accept
+  HBONE) but do not allow TCP 15008, the HBONE port ambient tunnels all mesh traffic over,
+  inbound or outbound; or they do not allow the link-local address istio-cni rewrites
+  kubelet health probes to (169.254.7.127 by default) on the pods' probe ports. Lines are
+  grouped by namespace and policy set. When the cluster does not enforce NetworkPolicy
+  (AWS VPC CNI with the network policy agent or controller off, and no other policy engine)
+  every line is info: the policies would block HBONE once enforcement is enabled.
+rootCause: >
+  NetworkPolicy is enforced on the node, outside the pod. Once a pod is in the ambient mesh,
+  traffic from other mesh pods arrives on port 15008 rather than the application port, and
+  ztunnel's outbound connections from inside the pod go to port 15008 of the destination.
+  Policies written for the application ports (and default-deny policies) block both.
+  Kubelet probes to ambient pods are SNATed to 169.254.7.127 so ztunnel can tell them apart;
+  depending on the CNI, a policy that does not allow that source blocks them.
+impact: >
+  Critical for ambient pods and waypoints: mesh connections time out (ztunnel logs
+  "maybe a NetworkPolicy is blocking HBONE port 15008"). A warning for HBONE-capable sidecars
+  (ambient clients cannot reach them) and before any pod is ambient. Blocked probe sources
+  make readiness and liveness probes fail on CNIs that enforce policy on node traffic, so
+  pods restart or drop out of Service endpoints after they join the mesh.
+signals:
+  # networkpolicy_hbone in src/diagnostics/mesh-checks/ambient-install.ts:
+  # - not evaluated without cluster/k8s-resources, or when istioctl older than 1.20 (which
+  #   does not collect networkpolicies) found none;
+  # - policies are additive: a pod is isolated for a direction once any policy of that type
+  #   selects it; ports omitted = all ports, from/to omitted = all peers, named ports resolve
+  #   against the pod's container ports; a rule counts for HBONE only when its peers can be
+  #   pods (selectors, or an ipBlock outside 169.254.0.0/16);
+  # - only Kubernetes NetworkPolicy is in the archive: CNI-specific policies (Cilium, Calico,
+  #   AdminNetworkPolicy) are not checked;
+  # - enforcement (networkPolicyEnforcement): "on" with a calico-node, cilium, antrea-agent,
+  #   kube-router, weave-net, anetd (GKE Dataplane V2) or azure-npm DaemonSet, or AWS VPC CNI
+  #   with aws-eks-nodeagent --enable-network-policy=true and amazon-vpc-cni
+  #   enable-network-policy-controller "true"; "off" (every line info) when AWS VPC CNI has
+  #   either off (or no node agent, before 1.14) and no other engine, provided kube-system
+  #   and calico-system (if present) were collected; otherwise "unknown": severities kept,
+  #   each line says enforcement depends on the CNI;
+  # - lines are sorted most severe first and set the namespace; nothing is capped here.
+  - source:
+      type: mesh_check
+      check: networkpolicy_hbone
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      Add TCP 15008 to every ingress rule that admits mesh clients of the pods listed under
+      Affected (from the same sources as the application ports), and to egress rules of
+      ambient pods whose egress is restricted.
+    yaml: |
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: my-app-allow-ingress-web
+      spec:
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: my-app
+        ingress:
+          - ports:
+              - port: 8080
+                protocol: TCP
+              - port: 15008   # HBONE
+                protocol: TCP
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Allow the ambient probe SNAT addresses so kubelet probes keep working: 169.254.7.127/32,
+      and on dual-stack or IPv6 clusters fd16:9254:7127:1337:ffff:ffff:ffff:ffff/128 (or the
+      HOST_PROBE_SNAT_IP set on istio-cni).
+    yaml: |
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: allow-kubelet-healthprobes
+      spec:
+        podSelector: {}
+        ingress:
+          - from:
+              - ipBlock:
+                  cidr: 169.254.7.127/32
+    effort: low
+    risk: low
+  - order: 3
+    description: >-
+      If a line says NetworkPolicy is not enforced, fix the policies before turning
+      enforcement on (EKS: enableNetworkPolicy in the VPC CNI add-on configuration), or they
+      start blocking HBONE the moment it is.
+    effort: low
+    risk: low
+  - order: 4
+    description: >-
+      Use Istio AuthorizationPolicy for workload-identity access control in the mesh, and
+      keep NetworkPolicy to L4 port and namespace boundaries that include 15008.
+    effort: medium
+    risk: low
+references:
+  - "https://istio.io/latest/docs/ambient/usage/networkpolicy/"
+  - "https://istio.io/latest/docs/ambient/architecture/hbone/"
+  - "https://docs.aws.amazon.com/eks/latest/userguide/cni-network-policy.html"
+enrichmentHints:
+  docsQuery: "ambient NetworkPolicy HBONE 15008 health probe 169.254.7.127"

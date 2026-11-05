@@ -1,0 +1,62 @@
+id: DIAG-024
+name: RequestAuthentication JWKS Cannot Be Fetched
+category: security
+severity: critical
+description: >
+  istiod logs that it cannot fetch the JSON Web Key Set of a RequestAuthentication issuer,
+  or a jwtRules entry is shaped so that the fetch cannot work. Failures are grouped by the
+  JWKS host, shown only as a stable hash (host#1a2b, keeping a well-known suffix such as
+  okta.com); no URI is printed.
+rootCause: >
+  istiod fetches every jwksUri itself (and resolves OIDC discovery from the issuer when
+  jwksUri is empty), from its own pod and namespace: a short Service name resolves in
+  istiod's namespace, egress from istiod may be blocked, the identity provider may be down
+  or rate-limit istiod, or the URI is malformed (a stray quote, an empty path segment, an
+  issuer that is not a URL with no jwksUri).
+impact: >
+  When istiod cannot get the keys it serves the proxies a JWKS no token can match (fail
+  closed): every request carrying a JWT of that issuer is rejected with 401. Critical when
+  istiod logged the fail-closed line or 3 or more failed fetches for a host (HTTP retries
+  inside one fetch are counted separately and alone stay a warning); a warning for a shape
+  problem with no failure in the log window; info for a failing host no RequestAuthentication
+  in the dump uses any more (likely fixed since).
+signals:
+  # jwks_fetch in src/diagnostics/mesh-checks/security-certs.ts:
+  # - log part: istiod logs only (pilot/pkg/model/jwks_resolver.go messages);
+  # - config part: RequestAuthentication jwtRules in cluster/crs;
+  # - not evaluated only when neither istiod logs nor cluster/crs are in the archive.
+  - source:
+      type: mesh_check
+      check: jwks_fetch
+    check:
+      op: exists
+remediation:
+  - order: 1
+    description: >-
+      From the istiod pod, fetch the jwksUri (kubectl -n istio-system exec deploy/istiod --
+      curl -sv <jwksUri>) to see the DNS, TLS or HTTP error. Use a fully qualified host
+      (<svc>.<ns>.svc.cluster.local) for in-cluster identity providers and allow istiod's
+      egress to the provider.
+    effort: low
+    risk: low
+  - order: 2
+    description: >-
+      Fix the jwtRules entry: a valid https jwksUri (no quotes, no // in the path), or an
+      issuer URL that serves /.well-known/openid-configuration; or inline the keys with jwks.
+    yaml: |
+      apiVersion: security.istio.io/v1
+      kind: RequestAuthentication
+      metadata:
+        name: <name>
+        namespace: <namespace>
+      spec:
+        jwtRules:
+          - issuer: "https://<issuer>"
+            jwksUri: "https://<issuer>/.well-known/jwks.json"
+    effort: low
+    risk: low
+references:
+  - "https://istio.io/latest/docs/reference/config/security/request_authentication/"
+  - "https://istio.io/latest/docs/tasks/security/authorization/authz-jwt/"
+enrichmentHints:
+  docsQuery: "RequestAuthentication jwksUri fetch failed istiod"
